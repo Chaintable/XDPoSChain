@@ -140,6 +140,7 @@ var (
 		utils.StoreRewardFlag,
 		utils.RollbackFlag,
 		utils.XDCSlaveModeFlag,
+		utils.VMTraceJsonConfigFlag,
 	}
 
 	rpcFlags = []cli.Flag{

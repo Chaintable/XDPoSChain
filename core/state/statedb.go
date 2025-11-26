@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/core/tracing"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/log"
@@ -84,6 +85,9 @@ type StateDB struct {
 	nextRevisionId int
 
 	lock sync.Mutex
+
+	hooks      *tracing.Hooks
+	originRoot common.Hash // The root hash of the state before the last commit
 }
 
 type AccountInfo struct {
@@ -125,6 +129,7 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 		logs:              make(map[common.Hash][]*types.Log),
 		preimages:         make(map[common.Hash][]byte),
 		accessList:        newAccessList(),
+		originRoot:        root,
 	}, nil
 }
 
@@ -169,6 +174,9 @@ func (self *StateDB) AddLog(log *types.Log) {
 	log.Index = self.logSize
 	self.logs[self.thash] = append(self.logs[self.thash], log)
 	self.logSize++
+	if self.hooks != nil && self.hooks.OnLog != nil {
+		self.hooks.OnLog(log)
+	}
 }
 
 func (self *StateDB) GetLogs(hash common.Hash) []*types.Log {
@@ -688,7 +696,26 @@ func (s *StateDB) clearJournalAndRefund() {
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) {
 	defer s.clearJournalAndRefund()
-
+	destructs := make(map[common.Hash]struct{})
+	accounts := make(map[common.Hash][]byte)
+	storages := make(map[common.Hash]map[common.Hash][]byte)
+	codes := make(map[common.Hash][]byte)
+	var trimLeftZeroes = func(s []byte) []byte {
+		idx := 0
+		for ; idx < len(s); idx++ {
+			if s[idx] != 0 {
+				break
+			}
+		}
+		return s[idx:]
+	}
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(trimLeftZeroes(val[:]))
+		return blob
+	}
 	// Commit objects to the trie.
 	for addr, stateObject := range s.stateObjects {
 		_, isDirty := s.stateObjectsDirty[addr]
@@ -696,12 +723,28 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		case stateObject.suicided || (isDirty && deleteEmptyObjects && stateObject.empty()):
 			// If the object has been removed, don't bother syncing it
 			// and just mark it for deletion in the trie.
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			destructs[addrHash] = struct{}{}
 			s.deleteStateObject(stateObject)
 		case isDirty:
 			// Write any contract code associated with the state object
 			if stateObject.code != nil && stateObject.dirtyCode {
+				codes[common.BytesToHash(stateObject.CodeHash())] = stateObject.code
 				s.db.TrieDB().InsertBlob(common.BytesToHash(stateObject.CodeHash()), stateObject.code)
 				stateObject.dirtyCode = false
+			}
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(stateObject.data)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			accounts[addrHash] = abuf
+			for key, val := range stateObject.dirtyStorage {
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := storages[addrHash]; !ok {
+					storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				storages[addrHash][hash] = encode(val)
 			}
 			// Write any storage changes in the state object to its storage trie.
 			if err := stateObject.CommitTrie(s.db); err != nil {
@@ -727,6 +770,9 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		}
 		return nil
 	})
+	if s.hooks != nil && s.hooks.OnCommit != nil {
+		s.hooks.OnCommit(s.originRoot, root, destructs, accounts, nil, storages, nil, codes)
+	}
 	return root, err
 }
 
@@ -798,4 +844,8 @@ func (s *StateDB) GetOwner(candidate common.Address) common.Address {
 	locCandidateOwner := locValidatorsState.Add(locValidatorsState, new(big.Int).SetUint64(uint64(0)))
 	ret := s.GetState(common.MasternodeVotingSMCBinary, common.BigToHash(locCandidateOwner))
 	return common.HexToAddress(ret.Hex())
+}
+
+func (s *StateDB) SetHooks(hooks *tracing.Hooks) {
+	s.hooks = hooks
 }
