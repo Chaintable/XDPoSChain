@@ -1,0 +1,22 @@
+# builder image
+FROM golang:1.21-bookworm as builder
+
+WORKDIR /XDPoSChain
+
+COPY . .
+
+RUN make XDC
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y ca-certificates wget libsnappy-dev libjemalloc-dev
+
+
+WORKDIR /app
+
+COPY --from=builder /XDPoSChain/build/bin /app
+
+
+EXPOSE 8545 8546 33688 33688/udp
+
+ENTRYPOINT ["/app/XDC"]
