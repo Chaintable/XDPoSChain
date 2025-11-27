@@ -1,5 +1,5 @@
 # builder image
-FROM golang:1.23-bookworm as builder
+FROM golang:1.24-bookworm as builder
 
 ARG GITHUB_TOKEN
 
@@ -17,6 +17,8 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y ca-certificates wget libsnappy-dev libjemalloc-dev
 
+# https://github.com/golang/go/issues/67273
+ENV GODEBUG=randseednop=0
 
 WORKDIR /app
 

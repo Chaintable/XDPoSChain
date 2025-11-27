@@ -1,9 +1,9 @@
 module github.com/XinFinOrg/XDPoSChain
 
-go 1.23.0
+go 1.24.0
 
 require (
-	github.com/VictoriaMetrics/fastcache v1.12.2
+	github.com/VictoriaMetrics/fastcache v1.13.2
 	github.com/aristanetworks/goarista v0.0.0-20231019142648-8c6f0862ab98
 	github.com/btcsuite/btcd v0.0.0-20171128150713-2e60448ffcc6
 	github.com/cespare/cp v1.1.1
@@ -38,7 +38,7 @@ require (
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7
 	golang.org/x/crypto v0.36.0
 	golang.org/x/sync v0.12.0
-	golang.org/x/sys v0.34.0
+	golang.org/x/sys v0.36.0
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce
@@ -47,7 +47,7 @@ require (
 )
 
 require (
-	github.com/Chaintable/pipeline v0.0.61-0.20251127053814-389b306ba128
+	github.com/Chaintable/pipeline v0.0.61-0.20251127063909-d6032a729353
 	github.com/deckarep/golang-set v1.8.0
 	github.com/dop251/goja v0.0.0-20200106141417-aaec0e7bde29
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible
