@@ -47,7 +47,7 @@ require (
 )
 
 require (
-	github.com/Chaintable/pipeline v0.0.61-0.20251127063909-d6032a729353
+	github.com/Chaintable/pipeline v0.0.61-0.20251128070241-60a791cf25ac
 	github.com/deckarep/golang-set v1.8.0
 	github.com/dop251/goja v0.0.0-20200106141417-aaec0e7bde29
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible
