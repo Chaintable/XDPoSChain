@@ -88,6 +88,11 @@ type StateDB struct {
 
 	hooks      *tracing.Hooks
 	originRoot common.Hash // The root hash of the state before the last commit
+
+	Destructs map[common.Hash]struct{}
+	Accounts  map[common.Hash][]byte
+	Storages  map[common.Hash]map[common.Hash][]byte
+	Codes     map[common.Hash][]byte
 }
 
 type AccountInfo struct {
@@ -130,6 +135,10 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 		preimages:         make(map[common.Hash][]byte),
 		accessList:        newAccessList(),
 		originRoot:        root,
+		Destructs:         make(map[common.Hash]struct{}),
+		Accounts:          make(map[common.Hash][]byte),
+		Storages:          make(map[common.Hash]map[common.Hash][]byte),
+		Codes:             make(map[common.Hash][]byte),
 	}, nil
 }
 
@@ -450,6 +459,8 @@ func (self *StateDB) deleteStateObject(stateObject *stateObject) {
 func (self *StateDB) DeleteAddress(addr common.Address) {
 	stateObject := self.getStateObject(addr)
 	if stateObject != nil && !stateObject.deleted {
+		addrHash := crypto.Keccak256Hash(addr.Bytes())
+		self.Destructs[addrHash] = struct{}{}
 		self.deleteStateObject(stateObject)
 	}
 }
@@ -570,6 +581,10 @@ func (self *StateDB) Copy() *StateDB {
 		logs:              make(map[common.Hash][]*types.Log, len(self.logs)),
 		logSize:           self.logSize,
 		preimages:         make(map[common.Hash][]byte),
+		Destructs:         make(map[common.Hash]struct{}),
+		Accounts:          make(map[common.Hash][]byte),
+		Storages:          make(map[common.Hash]map[common.Hash][]byte),
+		Codes:             make(map[common.Hash][]byte),
 	}
 	// Copy the dirty states, logs, and preimages
 	for addr := range self.stateObjectsDirty {
@@ -596,6 +611,19 @@ func (self *StateDB) Copy() *StateDB {
 	// However, it doesn't cost us much to copy an empty list, so we do it anyway
 	// to not blow up if we ever decide copy it in the middle of a transaction
 	state.accessList = self.accessList.Copy()
+	for addr := range self.Destructs {
+		state.Destructs[addr] = struct{}{}
+	}
+
+	for addr, acc := range self.Accounts {
+		state.Accounts[addr] = acc
+	}
+	for addr, storages := range self.Storages {
+		state.Storages[addr] = storages
+	}
+	for codehash, code := range self.Codes {
+		state.Codes[codehash] = code
+	}
 	return state
 }
 
@@ -696,10 +724,6 @@ func (s *StateDB) clearJournalAndRefund() {
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) {
 	defer s.clearJournalAndRefund()
-	destructs := make(map[common.Hash]struct{})
-	accounts := make(map[common.Hash][]byte)
-	storages := make(map[common.Hash]map[common.Hash][]byte)
-	codes := make(map[common.Hash][]byte)
 	var trimLeftZeroes = func(s []byte) []byte {
 		idx := 0
 		for ; idx < len(s); idx++ {
@@ -724,12 +748,12 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 			// If the object has been removed, don't bother syncing it
 			// and just mark it for deletion in the trie.
 			addrHash := crypto.Keccak256Hash(addr.Bytes())
-			destructs[addrHash] = struct{}{}
+			s.Destructs[addrHash] = struct{}{}
 			s.deleteStateObject(stateObject)
 		case isDirty:
 			// Write any contract code associated with the state object
 			if stateObject.code != nil && stateObject.dirtyCode {
-				codes[common.BytesToHash(stateObject.CodeHash())] = stateObject.code
+				s.Codes[common.BytesToHash(stateObject.CodeHash())] = stateObject.code
 				s.db.TrieDB().InsertBlob(common.BytesToHash(stateObject.CodeHash()), stateObject.code)
 				stateObject.dirtyCode = false
 			}
@@ -738,13 +762,13 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 			if err != nil {
 				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
 			}
-			accounts[addrHash] = abuf
+			s.Accounts[addrHash] = abuf
 			for key, val := range stateObject.dirtyStorage {
 				hash := crypto.Keccak256Hash(key[:])
-				if _, ok := storages[addrHash]; !ok {
-					storages[addrHash] = make(map[common.Hash][]byte)
+				if _, ok := s.Storages[addrHash]; !ok {
+					s.Storages[addrHash] = make(map[common.Hash][]byte)
 				}
-				storages[addrHash][hash] = encode(val)
+				s.Storages[addrHash][hash] = encode(val)
 			}
 			// Write any storage changes in the state object to its storage trie.
 			if err := stateObject.CommitTrie(s.db); err != nil {
@@ -771,7 +795,11 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		return nil
 	})
 	if s.hooks != nil && s.hooks.OnCommit != nil {
-		s.hooks.OnCommit(s.originRoot, root, destructs, accounts, nil, storages, nil, codes)
+		s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+		s.Destructs = make(map[common.Hash]struct{})
+		s.Accounts = make(map[common.Hash][]byte)
+		s.Storages = make(map[common.Hash]map[common.Hash][]byte)
+		s.Codes = make(map[common.Hash][]byte)
 	}
 	return root, err
 }
