@@ -10,6 +10,7 @@ import (
 
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/metrics"
+	"github.com/XinFinOrg/XDPoSChain/metrics/prometheus"
 )
 
 type exp struct {
@@ -56,6 +57,7 @@ func ExpHandler(r metrics.Registry) http.Handler {
 func Setup(address string) {
 	m := http.NewServeMux()
 	m.Handle("/debug/metrics", ExpHandler(metrics.DefaultRegistry))
+	m.Handle("/debug/metrics/prometheus", prometheus.Handler(metrics.DefaultRegistry))
 	log.Info("Starting metrics server", "addr", fmt.Sprintf("http://%s/debug/metrics", address))
 	go func() {
 		if err := http.ListenAndServe(address, m); err != nil {

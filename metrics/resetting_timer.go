@@ -16,6 +16,7 @@ type ResettingTimer interface {
 	Snapshot() ResettingTimer
 	Percentiles([]float64) []int64
 	Mean() float64
+	Count() int
 	Time(func())
 	Update(time.Duration)
 	UpdateSince(time.Time)
@@ -76,6 +77,10 @@ func (NilResettingTimer) Mean() float64 {
 	panic("Mean called on a NilResettingTimer")
 }
 
+func (NilResettingTimer) Count() int {
+	panic("Count called on a NilResettingTimer")
+}
+
 // UpdateSince is a no-op.
 func (NilResettingTimer) UpdateSince(time.Time) {}
 
@@ -111,6 +116,11 @@ func (t *StandardResettingTimer) Percentiles([]float64) []int64 {
 // Mean panics.
 func (t *StandardResettingTimer) Mean() float64 {
 	panic("Mean called on a StandardResettingTimer")
+}
+
+// Count panics.
+func (t *StandardResettingTimer) Count() int {
+	panic("Count called on a StandardResettingTimer")
 }
 
 // Record the duration of the execution of the given function.
@@ -179,6 +189,11 @@ func (t *ResettingTimerSnapshot) Mean() float64 {
 	}
 
 	return t.mean
+}
+
+// Count return the length of the values from snapshot.
+func (t *ResettingTimerSnapshot) Count() int {
+	return len(t.values)
 }
 
 func (t *ResettingTimerSnapshot) calc(percentiles []float64) {
