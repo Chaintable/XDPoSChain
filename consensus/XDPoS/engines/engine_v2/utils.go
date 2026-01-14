@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"github.com/XinFinOrg/XDPoSChain/accounts"
 	"github.com/XinFinOrg/XDPoSChain/common"
@@ -11,16 +12,15 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/consensus/XDPoS/utils"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
-	"github.com/XinFinOrg/XDPoSChain/crypto/sha3"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/rlp"
-	lru "github.com/hashicorp/golang-lru"
+	"golang.org/x/crypto/sha3"
 )
 
 func sigHash(header *types.Header) (hash common.Hash) {
-	hasher := sha3.NewKeccak256()
+	hasher := sha3.NewLegacyKeccak256()
 
-	err := rlp.Encode(hasher, []interface{}{
+	enc := []interface{}{
 		header.ParentHash,
 		header.UncleHash,
 		header.Coinbase,
@@ -38,19 +38,22 @@ func sigHash(header *types.Header) (hash common.Hash) {
 		header.Nonce,
 		header.Validators,
 		header.Penalties,
-	})
-	if err != nil {
-		log.Debug("Fail to encode", err)
+	}
+	if header.BaseFee != nil {
+		enc = append(enc, header.BaseFee)
+	}
+	if err := rlp.Encode(hasher, enc); err != nil {
+		panic("rlp.Encode fail: " + err.Error())
 	}
 	hasher.Sum(hash[:0])
 	return hash
 }
 
-func ecrecover(header *types.Header, sigcache *lru.ARCCache) (common.Address, error) {
+func ecrecover(header *types.Header, sigcache *utils.SigLRU) (common.Address, error) {
 	// If the signature's already cached, return that
 	hash := header.Hash()
 	if address, known := sigcache.Get(hash); known {
-		return address.(common.Address), nil
+		return address, nil
 	}
 
 	// Recover the public key and the Ethereum address
@@ -75,20 +78,60 @@ func decodeMasternodesFromHeaderExtra(checkpointHeader *types.Header) []common.A
 	return masternodes
 }
 
-func UniqueSignatures(signatureSlice []types.Signature) ([]types.Signature, []types.Signature) {
-	keys := make(map[string]bool)
-	list := []types.Signature{}
-	duplicates := []types.Signature{}
-	for _, signature := range signatureSlice {
-		hexOfSig := common.Bytes2Hex(signature)
-		if _, value := keys[hexOfSig]; !value {
-			keys[hexOfSig] = true
-			list = append(list, signature)
+func RecoverUniqueSigners(signedHash common.Hash, signatureList []types.Signature) ([]types.Signature, []types.Signature, error) {
+	if (signedHash == common.Hash{}) {
+		return nil, nil, errors.New("signedHash cannot be empty")
+	}
+	if len(signatureList) == 0 {
+		return []types.Signature{}, []types.Signature{}, nil
+	}
+
+	type Message struct {
+		pubkey common.Address
+		sig    types.Signature
+	}
+
+	result := make(chan Message, len(signatureList))
+	errCh := make(chan error, len(signatureList))
+	var wg sync.WaitGroup
+	wg.Add(len(signatureList))
+	for _, signature := range signatureList {
+		go func(sig types.Signature) {
+			defer wg.Done()
+			pubkey, err := crypto.Ecrecover(signedHash.Bytes(), signature)
+			if err != nil {
+				log.Error("[UniqueSignatures] error while recovering public key", "error", err, "signature", common.Bytes2Hex(signature), "signedHash", signedHash.Hex())
+				errCh <- err
+				return
+			}
+			var signerAddress common.Address
+			copy(signerAddress[:], crypto.Keccak256(pubkey[1:])[12:])
+			result <- Message{pubkey: signerAddress, sig: sig}
+		}(signature)
+	}
+	wg.Wait()
+	close(result)
+	close(errCh)
+
+	if len(errCh) > 0 {
+		return nil, nil, <-errCh
+	}
+
+	keys := make(map[string]struct{})
+	uniqueSigners := make([]types.Signature, 0, len(result))
+	duplicates := make([]types.Signature, 0, len(result))
+	for r := range result {
+		pubkeyHex := r.pubkey.Hex()
+		if _, ok := keys[pubkeyHex]; !ok {
+			keys[pubkeyHex] = struct{}{}
+			uniqueSigners = append(uniqueSigners, r.sig)
 		} else {
-			duplicates = append(duplicates, signature)
+			log.Warn("[UniqueSignatures] duplicate signing found", "pubkey", pubkeyHex, "signedMessage", signedHash.Hex(), "signature", r.sig)
+			duplicates = append(duplicates, r.sig)
 		}
 	}
-	return list, duplicates
+
+	return uniqueSigners, duplicates, nil
 }
 
 func (x *XDPoS_v2) signSignature(signingHash common.Hash) (types.Signature, error) {
@@ -97,9 +140,12 @@ func (x *XDPoS_v2) signSignature(signingHash common.Hash) (types.Signature, erro
 	signer, signFn := x.signer, x.signFn
 	x.signLock.RUnlock()
 
+	if signFn == nil {
+		return nil, errors.New("signFn is nil")
+	}
 	signedHash, err := signFn(accounts.Account{Address: signer}, signingHash.Bytes())
 	if err != nil {
-		return nil, fmt.Errorf("Error %v while signing hash", err)
+		return nil, fmt.Errorf("error %v while signing hash", err)
 	}
 	return signedHash, nil
 }
@@ -107,12 +153,12 @@ func (x *XDPoS_v2) signSignature(signingHash common.Hash) (types.Signature, erro
 func (x *XDPoS_v2) verifyMsgSignature(signedHashToBeVerified common.Hash, signature types.Signature, masternodes []common.Address) (bool, common.Address, error) {
 	var signerAddress common.Address
 	if len(masternodes) == 0 {
-		return false, signerAddress, errors.New("Empty masternode list detected when verifying message signatures")
+		return false, signerAddress, errors.New("empty masternode list detected when verifying message signatures")
 	}
 	// Recover the public key and the Ethereum address
 	pubkey, err := crypto.Ecrecover(signedHashToBeVerified.Bytes(), signature)
 	if err != nil {
-		return false, signerAddress, fmt.Errorf("Error while verifying message: %v", err)
+		return false, signerAddress, fmt.Errorf("error while verifying message: %v", err)
 	}
 
 	copy(signerAddress[:], crypto.Keccak256(pubkey[1:])[12:])
@@ -176,11 +222,17 @@ func (x *XDPoS_v2) CalculateMissingRounds(chain consensus.ChainReader, header *t
 		return nil, err
 	}
 	masternodes := switchInfo.Masternodes
+	if len(masternodes) == 0 {
+		return nil, fmt.Errorf("masternodes is empty in CalculateMissingRounds, number = %v, hash %#x", header.Number, header.Hash())
+	}
 
 	// Loop through from the epoch switch block to the current "header" block
 	nextHeader := header
 	for nextHeader.Number.Cmp(switchInfo.EpochSwitchBlockInfo.Number) > 0 {
 		parentHeader := chain.GetHeaderByHash(nextHeader.ParentHash)
+		if parentHeader == nil {
+			return nil, fmt.Errorf("fail to get header by hash %v: ", nextHeader.ParentHash)
+		}
 		parentRound, err := x.GetRoundNumber(parentHeader)
 		if err != nil {
 			return nil, err
@@ -223,9 +275,8 @@ func (x *XDPoS_v2) CalculateMissingRounds(chain consensus.ChainReader, header *t
 func (x *XDPoS_v2) getBlockByEpochNumberInCache(chain consensus.ChainReader, estRound types.Round) *types.BlockInfo {
 	epochSwitchInCache := make([]*types.BlockInfo, 0)
 	for r := estRound; r < estRound+types.Round(x.config.Epoch); r++ {
-		info, ok := x.round2epochBlockInfo.Get(r)
-		if ok {
-			blockInfo := info.(*types.BlockInfo)
+		blockInfo, ok := x.round2epochBlockInfo.Get(r)
+		if ok && blockInfo != nil {
 			epochSwitchInCache = append(epochSwitchInCache, blockInfo)
 		}
 	}
@@ -293,11 +344,14 @@ func (x *XDPoS_v2) binarySearchBlockByEpochNumber(chain consensus.ChainReader, t
 
 func (x *XDPoS_v2) GetBlockByEpochNumber(chain consensus.ChainReader, targetEpochNum uint64) (*types.BlockInfo, error) {
 	currentHeader := chain.CurrentHeader()
+	if currentHeader == nil {
+		return nil, errors.New("current header is nil")
+	}
 	epochSwitchInfo, err := x.getEpochSwitchInfo(chain, currentHeader, currentHeader.Hash())
 	if err != nil {
 		return nil, err
 	}
-	epochNum := x.config.V2.SwitchBlock.Uint64()/x.config.Epoch + uint64(epochSwitchInfo.EpochSwitchBlockInfo.Round)/x.config.Epoch
+	epochNum := x.config.V2.SwitchEpoch + uint64(epochSwitchInfo.EpochSwitchBlockInfo.Round)/x.config.Epoch
 	// if current epoch is this epoch, we early return the result
 	if targetEpochNum == epochNum {
 		return epochSwitchInfo.EpochSwitchBlockInfo, nil
@@ -305,11 +359,11 @@ func (x *XDPoS_v2) GetBlockByEpochNumber(chain consensus.ChainReader, targetEpoc
 	if targetEpochNum > epochNum {
 		return nil, errors.New("input epoch number > current epoch number")
 	}
-	if targetEpochNum < x.config.V2.SwitchBlock.Uint64()/x.config.Epoch {
+	if targetEpochNum < x.config.V2.SwitchEpoch {
 		return nil, errors.New("input epoch number < v2 begin epoch number")
 	}
 	// the block's round should be in [estRound,estRound+Epoch-1]
-	estRound := types.Round((targetEpochNum - x.config.V2.SwitchBlock.Uint64()/x.config.Epoch) * x.config.Epoch)
+	estRound := types.Round((targetEpochNum - x.config.V2.SwitchEpoch) * x.config.Epoch)
 	// check the round2epochBlockInfo cache
 	blockInfo := x.getBlockByEpochNumberInCache(chain, estRound)
 	if blockInfo != nil {
@@ -326,12 +380,15 @@ func (x *XDPoS_v2) GetBlockByEpochNumber(chain consensus.ChainReader, targetEpoc
 	closeEpochNum := uint64(2)
 	if closeEpochNum >= epochNum-targetEpochNum {
 		estBlockHeader := chain.GetHeaderByNumber(estBlockNum.Uint64())
+		if estBlockHeader == nil {
+			return nil, fmt.Errorf("fail to get est block header by number: %v", estBlockNum)
+		}
 		epochSwitchInfos, err := x.GetEpochSwitchInfoBetween(chain, estBlockHeader, currentHeader)
 		if err != nil {
 			return nil, err
 		}
 		for _, info := range epochSwitchInfos {
-			epochNum := x.config.V2.SwitchBlock.Uint64()/x.config.Epoch + uint64(info.EpochSwitchBlockInfo.Round)/x.config.Epoch
+			epochNum := x.config.V2.SwitchEpoch + uint64(info.EpochSwitchBlockInfo.Round)/x.config.Epoch
 			if epochNum == targetEpochNum {
 				return info.EpochSwitchBlockInfo, nil
 			}

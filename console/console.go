@@ -73,6 +73,8 @@ type Console struct {
 	printer  io.Writer    // Output writer to serialize any display strings to
 }
 
+// New initializes a JavaScript interpreted runtime environment and sets defaults
+// with the config struct.
 func New(config Config) (*Console, error) {
 	// Handle unset config values gracefully
 	if config.Prompter == nil {
@@ -120,7 +122,6 @@ func (c *Console) init(preload []string) error {
 	// Add bridge overrides for web3.js functionality.
 	c.jsre.Do(func(vm *goja.Runtime) {
 		c.initAdmin(vm, bridge)
-		c.initPersonal(vm, bridge)
 	})
 
 	// Preload JavaScript files.
@@ -157,12 +158,10 @@ func (c *Console) initConsoleObject() {
 }
 
 func (c *Console) initWeb3(bridge *bridge) error {
-	bnJS := string(deps.MustAsset("bignumber.js"))
-	web3JS := string(deps.MustAsset("web3.js"))
-	if err := c.jsre.Compile("bignumber.js", bnJS); err != nil {
+	if err := c.jsre.Compile("bignumber.js", deps.BigNumberJS); err != nil {
 		return fmt.Errorf("bignumber.js: %v", err)
 	}
-	if err := c.jsre.Compile("web3.js", web3JS); err != nil {
+	if err := c.jsre.Compile("web3.js", deps.Web3JS); err != nil {
 		return fmt.Errorf("web3.js: %v", err)
 	}
 	if _, err := c.jsre.Run("var Web3 = require('web3');"); err != nil {
@@ -220,29 +219,6 @@ func (c *Console) initAdmin(vm *goja.Runtime, bridge *bridge) {
 	}
 }
 
-// initPersonal redirects account-related API methods through the bridge.
-//
-// If the console is in interactive mode and the 'personal' API is available, override
-// the openWallet, unlockAccount, newAccount and sign methods since these require user
-// interaction. The original web3 callbacks are stored in 'jeth'. These will be called
-// by the bridge after the prompt and send the original web3 request to the backend.
-func (c *Console) initPersonal(vm *goja.Runtime, bridge *bridge) {
-	personal := getObject(vm, "personal")
-	if personal == nil || c.prompter == nil {
-		return
-	}
-	jeth := vm.NewObject()
-	vm.Set("jeth", jeth)
-	jeth.Set("openWallet", personal.Get("openWallet"))
-	jeth.Set("unlockAccount", personal.Get("unlockAccount"))
-	jeth.Set("newAccount", personal.Get("newAccount"))
-	jeth.Set("sign", personal.Get("sign"))
-	personal.Set("openWallet", jsre.MakeCallback(vm, bridge.OpenWallet))
-	personal.Set("unlockAccount", jsre.MakeCallback(vm, bridge.UnlockAccount))
-	personal.Set("newAccount", jsre.MakeCallback(vm, bridge.NewAccount))
-	personal.Set("sign", jsre.MakeCallback(vm, bridge.Sign))
-}
-
 func (c *Console) clearHistory() {
 	c.history = nil
 	c.prompter.ClearHistory()
@@ -256,7 +232,7 @@ func (c *Console) clearHistory() {
 // consoleOutput is an override for the console.log and console.error methods to
 // stream the output into the configured output stream instead of stdout.
 func (c *Console) consoleOutput(call goja.FunctionCall) goja.Value {
-	var output []string
+	output := make([]string, 0, len(call.Arguments))
 	for _, argument := range call.Arguments {
 		output = append(output, fmt.Sprintf("%v", argument))
 	}
@@ -271,17 +247,13 @@ func (c *Console) AutoCompleteInput(line string, pos int) (string, []string, str
 	if len(line) == 0 || pos == 0 {
 		return "", nil, ""
 	}
-	// Chunck data to relevant part for autocompletion
+	// Chunk data to relevant part for autocompletion
 	// E.g. in case of nested lines eth.getBalance(eth.coinb<tab><tab>
 	start := pos - 1
 	for ; start > 0; start-- {
 		// Skip all methods and namespaces (i.e. including the dot)
-		if line[start] == '.' || (line[start] >= 'a' && line[start] <= 'z') || (line[start] >= 'A' && line[start] <= 'Z') {
-			continue
-		}
-		// Handle web3 in a special way (i.e. other numbers aren't auto completed)
-		if start >= 3 && line[start-3:start] == "web3" {
-			start -= 3
+		c := line[start]
+		if c == '.' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '1' && c <= '9') {
 			continue
 		}
 		// We've hit an unexpected character, autocomplete form here

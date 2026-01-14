@@ -18,10 +18,12 @@ package lendingstate
 
 import (
 	"fmt"
-	"github.com/XinFinOrg/XDPoSChain/common"
-	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"math/big"
 	"testing"
+
+	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
+	"github.com/XinFinOrg/XDPoSChain/core/types"
 )
 
 func TestEchangeStates(t *testing.T) {
@@ -39,7 +41,7 @@ func TestEchangeStates(t *testing.T) {
 	// Create an empty statedb database
 	db := rawdb.NewMemoryDatabase()
 	stateCache := NewDatabase(db)
-	statedb, _ := New(common.Hash{}, stateCache)
+	statedb, _ := New(types.EmptyRootHash, stateCache)
 
 	// Update it with some lenddinges
 	for i := 0; i < numberOrder; i++ {
@@ -126,7 +128,7 @@ func TestRevertStates(t *testing.T) {
 	// Create an empty statedb database
 	db := rawdb.NewMemoryDatabase()
 	stateCache := NewDatabase(db)
-	statedb, _ := New(common.Hash{}, stateCache)
+	statedb, _ := New(types.EmptyRootHash, stateCache)
 
 	// Update it with some lenddinges
 	for i := 0; i < numberOrder; i++ {
@@ -225,9 +227,7 @@ func TestDumpStates(t *testing.T) {
 	orderBook := common.StringToHash("BTC/XDC")
 	numberOrder := 20
 	orderItems := []LendingItem{}
-	relayers := []common.Hash{}
 	for i := 0; i < numberOrder; i++ {
-		relayers = append(relayers, common.BigToHash(big.NewInt(int64(i))))
 		id := new(big.Int).SetUint64(uint64(i) + 1)
 		orderItems = append(orderItems, LendingItem{LendingId: id.Uint64(), Quantity: big.NewInt(int64(2*i + 1)), Interest: big.NewInt(1), Side: Investing, Signature: &Signature{V: 1, R: common.HexToHash("111111"), S: common.HexToHash("222222222222")}})
 		orderItems = append(orderItems, LendingItem{LendingId: id.Uint64(), Quantity: big.NewInt(int64(2*i + 1)), Interest: big.NewInt(1), Side: Borrowing, Signature: &Signature{V: 1, R: common.HexToHash("3333333333"), S: common.HexToHash("22222222222222222")}})
@@ -235,7 +235,7 @@ func TestDumpStates(t *testing.T) {
 	// Create an empty statedb database
 	db := rawdb.NewMemoryDatabase()
 	stateCache := NewDatabase(db)
-	statedb, _ := New(common.Hash{}, stateCache)
+	statedb, _ := New(types.EmptyRootHash, stateCache)
 	for i := 0; i < len(orderItems); i++ {
 		orderIdHash := common.BigToHash(new(big.Int).SetUint64(orderItems[i].LendingId))
 		statedb.InsertLendingItem(orderBook, orderIdHash, orderItems[i])

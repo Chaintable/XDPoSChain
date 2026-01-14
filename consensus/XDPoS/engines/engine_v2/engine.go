@@ -1,27 +1,32 @@
 package engine_v2
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/XinFinOrg/XDPoSChain/accounts"
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/common/countdown"
+	"github.com/XinFinOrg/XDPoSChain/common/lru"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
 	"github.com/XinFinOrg/XDPoSChain/consensus/XDPoS/utils"
 	"github.com/XinFinOrg/XDPoSChain/consensus/clique"
+	"github.com/XinFinOrg/XDPoSChain/consensus/misc"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/ethdb"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/params"
-	lru "github.com/hashicorp/golang-lru"
+	"github.com/XinFinOrg/XDPoSChain/trie"
+	"golang.org/x/sync/errgroup"
 )
 
 type XDPoS_v2 struct {
@@ -32,14 +37,14 @@ type XDPoS_v2 struct {
 	isInitilised bool                // status of v2 variables
 	whosTurn     common.Address      // Record waiting for who to mine
 
-	snapshots       *lru.ARCCache // Snapshots for gap block
-	signatures      *lru.ARCCache // Signatures of recent blocks to speed up mining
-	epochSwitches   *lru.ARCCache // infos of epoch: master nodes, epoch switch block info, parent of that info
-	verifiedHeaders *lru.ARCCache
+	snapshots       *lru.Cache[common.Hash, *SnapshotV2]            // Snapshots for gap block
+	signatures      *utils.SigLRU                                   // Signatures of recent blocks to speed up mining
+	epochSwitches   *lru.Cache[common.Hash, *types.EpochSwitchInfo] // infos of epoch: master nodes, epoch switch block info, parent of that info
+	verifiedHeaders *lru.Cache[common.Hash, struct{}]
 
 	// only contains epoch switch block info
 	// input: round, output: infos of epoch switch block and next epoch switch block info
-	round2epochBlockInfo *lru.ARCCache
+	round2epochBlockInfo *lru.Cache[types.Round, *types.BlockInfo]
 
 	signer   common.Address  // Ethereum address of the signing key
 	signFn   clique.SignerFn // Signer function to authorize hashes with
@@ -76,13 +81,10 @@ func New(chainConfig *params.ChainConfig, db ethdb.Database, minePeriodCh chan i
 	config := chainConfig.XDPoS
 	// Setup timeoutTimer
 	duration := time.Duration(config.V2.CurrentConfig.TimeoutPeriod) * time.Second
-	timeoutTimer := countdown.NewCountDown(duration)
-
-	snapshots, _ := lru.NewARC(utils.InmemorySnapshots)
-	signatures, _ := lru.NewARC(utils.InmemorySnapshots)
-	epochSwitches, _ := lru.NewARC(int(utils.InmemoryEpochs))
-	verifiedHeaders, _ := lru.NewARC(utils.InmemorySnapshots)
-	round2epochBlockInfo, _ := lru.NewARC(utils.InmemoryRound2Epochs)
+	timeoutTimer, err := countdown.NewExpCountDown(duration, config.V2.CurrentConfig.ExpTimeoutConfig.Base, config.V2.CurrentConfig.ExpTimeoutConfig.MaxExponent)
+	if err != nil {
+		log.Crit("create exp countdown", "err", err)
+	}
 
 	timeoutPool := utils.NewPool()
 	votePool := utils.NewPool()
@@ -93,17 +95,17 @@ func New(chainConfig *params.ChainConfig, db ethdb.Database, minePeriodCh chan i
 		db:           db,
 		isInitilised: false,
 
-		signatures: signatures,
+		signatures: lru.NewCache[common.Hash, common.Address](utils.InMemorySnapshots),
 
-		verifiedHeaders: verifiedHeaders,
-		snapshots:       snapshots,
-		epochSwitches:   epochSwitches,
+		verifiedHeaders: lru.NewCache[common.Hash, struct{}](utils.InMemorySnapshots),
+		snapshots:       lru.NewCache[common.Hash, *SnapshotV2](utils.InMemorySnapshots),
+		epochSwitches:   lru.NewCache[common.Hash, *types.EpochSwitchInfo](int(utils.InMemoryEpochs)),
 		timeoutWorker:   timeoutTimer,
 		BroadcastCh:     make(chan interface{}),
 		minePeriodCh:    minePeriodCh,
 		newRoundCh:      newRoundCh,
 
-		round2epochBlockInfo: round2epochBlockInfo,
+		round2epochBlockInfo: lru.NewCache[types.Round, *types.BlockInfo](utils.InMemoryRound2Epochs),
 
 		timeoutPool: timeoutPool,
 		votePool:    votePool,
@@ -144,12 +146,15 @@ func (x *XDPoS_v2) UpdateParams(header *types.Header) {
 	x.config.V2.UpdateConfig(uint64(round))
 
 	// Setup timeoutTimer
-	duration := time.Duration(x.config.V2.CurrentConfig.TimeoutPeriod) * time.Second
-	x.timeoutWorker.SetTimeoutDuration(duration)
-
+	currentConfig := x.config.V2.GetCurrentConfig()
+	duration := time.Duration(currentConfig.TimeoutPeriod) * time.Second
+	err = x.timeoutWorker.SetParams(duration, currentConfig.ExpTimeoutConfig.Base, currentConfig.ExpTimeoutConfig.MaxExponent)
+	if err != nil {
+		log.Error("[UpdateParams] set params failed", "err", err)
+	}
 	// avoid deadlock
 	go func() {
-		x.minePeriodCh <- x.config.V2.CurrentConfig.MinePeriod
+		x.minePeriodCh <- currentConfig.MinePeriod
 	}()
 }
 
@@ -170,6 +175,9 @@ func (x *XDPoS_v2) SignHash(header *types.Header) (hash common.Hash) {
 
 // Initial V2 related parameters
 func (x *XDPoS_v2) Initial(chain consensus.ChainReader, header *types.Header) error {
+	x.lock.Lock()
+	defer x.lock.Unlock()
+
 	return x.initial(chain, header)
 }
 
@@ -197,7 +205,10 @@ func (x *XDPoS_v2) initial(chain consensus.ChainReader, header *types.Header) er
 			Signatures:        nil,
 			GapNumber:         header.Number.Uint64() - x.config.Gap,
 		}
-
+		// prevent overflow
+		if header.Number.Uint64() < x.config.Gap {
+			quorumCert.GapNumber = 0
+		}
 		// can not call processQC because round is equal to default
 		x.currentRound = 1
 		x.highestQuorumCert = quorumCert
@@ -215,7 +226,10 @@ func (x *XDPoS_v2) initial(chain consensus.ChainReader, header *types.Header) er
 	}
 
 	// Initial first v2 snapshot
-	lastGapNum := x.config.V2.SwitchBlock.Uint64() - x.config.Gap
+	lastGapNum := uint64(0)
+	if x.config.V2.SwitchBlock.Uint64() > x.config.Gap {
+		lastGapNum = x.config.V2.SwitchBlock.Uint64() - x.config.Gap
+	}
 	lastGapHeader := chain.GetHeaderByNumber(lastGapNum)
 
 	snap, _ := loadSnapshot(x.db, lastGapHeader.Hash())
@@ -245,14 +259,15 @@ func (x *XDPoS_v2) initial(chain consensus.ChainReader, header *types.Header) er
 	}
 
 	// Initial timeout
-	log.Warn("[initial] miner wait period", "period", x.config.V2.CurrentConfig.MinePeriod)
+	currentConfig := x.config.V2.GetCurrentConfig()
+	log.Warn("[initial] miner wait period", "period", currentConfig.MinePeriod)
 	// avoid deadlock
 	go func() {
-		x.minePeriodCh <- x.config.V2.CurrentConfig.MinePeriod
+		x.minePeriodCh <- currentConfig.MinePeriod
 	}()
 
 	// Kick-off the countdown timer
-	x.timeoutWorker.Reset(chain)
+	x.timeoutWorker.Reset(chain, 0, 0)
 	x.isInitilised = true
 
 	log.Warn("[initial] finish initialisation")
@@ -319,11 +334,18 @@ func (x *XDPoS_v2) Prepare(chain consensus.ChainReader, header *types.Header) er
 	number := header.Number.Uint64()
 	parent := chain.GetHeader(header.ParentHash, number-1)
 
-	log.Info("Preparing new block!", "Number", number, "Parent Hash", parent.Hash())
 	if parent == nil {
 		return consensus.ErrUnknownAncestor
 	}
+	// Ensure gas settings are bounded
+	if err := misc.VerifyGaslimit(parent.GasLimit, header.GasLimit); err != nil {
+		return err
+	}
+	if header.GasUsed > header.GasLimit {
+		return fmt.Errorf("gas used exceeded gaslimit, gas used: %d, gas limit: %d", header.GasUsed, header.GasLimit)
+	}
 
+	log.Info("Preparing new block!", "Number", number, "Parent Hash", parent.Hash())
 	x.signLock.RLock()
 	signer := x.signer
 	x.signLock.RUnlock()
@@ -402,13 +424,24 @@ func (x *XDPoS_v2) Finalize(chain consensus.ChainReader, header *types.Header, s
 			}
 		}
 	}
+	parentHeader := chain.GetHeader(header.ParentHash, header.Number.Uint64()-1)
+	if parentHeader == nil {
+		return nil, consensus.ErrUnknownAncestor
+	}
+	// Ensure gas settings are bounded
+	if err := misc.VerifyGaslimit(parentHeader.GasLimit, header.GasLimit); err != nil {
+		return nil, err
+	}
+	if header.GasUsed > header.GasLimit {
+		return nil, fmt.Errorf("gas used exceeded gaslimit, gas used: %d, gas limit: %d", header.GasUsed, header.GasLimit)
+	}
 
 	// the state remains as is and uncles are dropped
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 	header.UncleHash = types.CalcUncleHash(nil)
 
 	// Assemble and return the final block for sealing
-	return types.NewBlock(header, txs, nil, receipts), nil
+	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }
 
 // Authorize injects a private key into the consensus engine to mint new blocks with.
@@ -498,7 +531,10 @@ func (x *XDPoS_v2) GetSnapshot(chain consensus.ChainReader, header *types.Header
 
 func (x *XDPoS_v2) UpdateMasternodes(chain consensus.ChainReader, header *types.Header, ms []utils.Masternode) error {
 	number := header.Number.Uint64()
-	log.Trace("[UpdateMasternodes]")
+	log.Trace("[UpdateMasternodes]", "number", number, "hash", header.Hash())
+	if number%x.config.Epoch != x.config.Epoch-x.config.Gap {
+		return fmt.Errorf("[UpdateMasternodes] not gap block, number: %d, epoch: %d,gap: %d", number, x.config.Epoch, x.config.Gap)
+	}
 
 	masterNodes := []common.Address{}
 	for _, m := range ms {
@@ -674,7 +710,7 @@ func (x *XDPoS_v2) VerifyTimeoutMessage(chain consensus.ChainReader, timeoutMsg 
 	}
 	if len(snap.NextEpochCandidates) == 0 {
 		log.Error("[VerifyTimeoutMessage] cannot find NextEpochCandidates from snapshot", "messageGapNumber", timeoutMsg.GapNumber)
-		return false, errors.New("Empty master node lists from snapshot")
+		return false, errors.New("empty master node lists from snapshot")
 	}
 
 	verified, signer, err := x.verifyMsgSignature(types.TimeoutSigHash(&types.TimeoutForSign{
@@ -802,10 +838,20 @@ func (x *XDPoS_v2) verifyQC(blockChainReader consensus.ChainReader, quorumCert *
 	epochInfo, err := x.getEpochSwitchInfo(blockChainReader, parentHeader, quorumCert.ProposedBlockInfo.Hash)
 	if err != nil {
 		log.Error("[verifyQC] Error when getting epoch switch Info to verify QC", "Error", err)
-		return errors.New("Fail to verify QC due to failure in getting epoch switch info")
+		return errors.New("fail to verify QC due to failure in getting epoch switch info")
 	}
 
-	signatures, duplicates := UniqueSignatures(quorumCert.Signatures)
+	signedVoteObj := types.VoteSigHash(&types.VoteForSign{
+		ProposedBlockInfo: quorumCert.ProposedBlockInfo,
+		GapNumber:         quorumCert.GapNumber,
+	})
+
+	signatures, duplicates, err := RecoverUniqueSigners(signedVoteObj, quorumCert.Signatures)
+	if err != nil {
+		log.Error("[verifyQC] Error while getting unique signatures from QC", "qcBlockNum", quorumCert.ProposedBlockInfo.Number, "qcRound", quorumCert.ProposedBlockInfo.Round, "qcBlockHash", quorumCert.ProposedBlockInfo.Hash, "qcSignLen", len(quorumCert.Signatures), "error", err)
+		return err
+	}
+
 	if len(duplicates) != 0 {
 		for _, d := range duplicates {
 			log.Warn("[verifyQC] duplicated signature in QC", "duplicate", common.Bytes2Hex(d))
@@ -821,37 +867,44 @@ func (x *XDPoS_v2) verifyQC(blockChainReader consensus.ChainReader, quorumCert *
 	}
 	start := time.Now()
 
-	var wg sync.WaitGroup
-	wg.Add(len(signatures))
-	var haveError error
-
-	for _, signature := range signatures {
-		go func(sig types.Signature) {
-			defer wg.Done()
-			verified, _, err := x.verifyMsgSignature(types.VoteSigHash(&types.VoteForSign{
-				ProposedBlockInfo: quorumCert.ProposedBlockInfo,
-				GapNumber:         quorumCert.GapNumber,
-			}), sig, epochInfo.Masternodes)
-			if err != nil {
-				log.Error("[verifyQC] Error while verfying QC message signatures", "Error", err)
-				haveError = errors.New("Error while verfying QC message signatures")
-				return
+	eg, ctx := errgroup.WithContext(context.Background())
+	eg.SetLimit(runtime.NumCPU())
+	for _, sig := range signatures {
+		eg.Go(func() error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				verified, _, err := x.verifyMsgSignature(types.VoteSigHash(&types.VoteForSign{
+					ProposedBlockInfo: quorumCert.ProposedBlockInfo,
+					GapNumber:         quorumCert.GapNumber,
+				}), sig, epochInfo.Masternodes)
+				if err != nil {
+					log.Error("[verifyQC] Error while verfying QC message signatures", "Error", err)
+					return errors.New("error while verfying QC message signatures")
+				}
+				if !verified {
+					log.Warn("[verifyQC] Signature not verified doing QC verification", "QC", quorumCert)
+					return errors.New("fail to verify QC due to signature mis-match")
+				}
+				return nil
 			}
-			if !verified {
-				log.Warn("[verifyQC] Signature not verified doing QC verification", "QC", quorumCert)
-				haveError = errors.New("Fail to verify QC due to signature mis-match")
-				return
-			}
-		}(signature)
+		})
 	}
-	wg.Wait()
+	err = eg.Wait()
+
 	elapsed := time.Since(start)
 	log.Debug("[verifyQC] time verify message signatures of qc", "elapsed", elapsed)
-	if haveError != nil {
-		return haveError
+	if err != nil {
+		return err
 	}
 	epochSwitchNumber := epochInfo.EpochSwitchBlockInfo.Number.Uint64()
-	gapNumber := epochSwitchNumber - epochSwitchNumber%x.config.Epoch - x.config.Gap
+	gapNumber := epochSwitchNumber - epochSwitchNumber%x.config.Epoch
+	if gapNumber > x.config.Gap {
+		gapNumber -= x.config.Gap
+	} else {
+		gapNumber = 0
+	}
 	if gapNumber != quorumCert.GapNumber {
 		log.Error("[verifyQC] QC gap number mismatch", "epochSwitchNumber", epochSwitchNumber, "BlockNum", quorumCert.ProposedBlockInfo.Number, "BlockInfoHash", quorumCert.ProposedBlockInfo.Hash, "Gap", quorumCert.GapNumber, "GapShouldBe", gapNumber)
 		return fmt.Errorf("gap number mismatch QC Gap %d, shouldBe %d", quorumCert.GapNumber, gapNumber)
@@ -910,7 +963,7 @@ func (x *XDPoS_v2) setNewRound(blockChainReader consensus.ChainReader, round typ
 	log.Info("[setNewRound] new round and reset pools and workers", "round", round)
 	x.currentRound = round
 	x.timeoutCount = 0
-	x.timeoutWorker.Reset(blockChainReader)
+	x.timeoutWorker.Reset(blockChainReader, x.currentRound, x.highestQuorumCert.ProposedBlockInfo.Round)
 	x.timeoutPool.Clear()
 	// don't need to clean vote pool, we have other process to clean and it's not good to clean here, some edge case may break
 	// for example round gets bump during collecting vote, so we have to keep vote.
@@ -943,6 +996,10 @@ func (x *XDPoS_v2) commitBlocks(blockChainReader consensus.ChainReader, proposed
 	}
 	// Find the last two parent block and check their rounds are the continuous
 	parentBlock := blockChainReader.GetHeaderByHash(proposedBlockHeader.ParentHash)
+	if parentBlock == nil {
+		log.Error("[commitBlocks] Fail to get header by parent hash", "hash", proposedBlockHeader.ParentHash)
+		return false, fmt.Errorf("commitBlocks fail to get header by parent hash: %v", proposedBlockHeader.ParentHash)
+	}
 
 	_, round, _, err := x.getExtraFields(parentBlock)
 	if err != nil {
@@ -956,6 +1013,10 @@ func (x *XDPoS_v2) commitBlocks(blockChainReader consensus.ChainReader, proposed
 
 	// If parent round is continuous, we check grandparent
 	grandParentBlock := blockChainReader.GetHeaderByHash(parentBlock.ParentHash)
+	if grandParentBlock == nil {
+		log.Error("[commitBlocks] Fail to get header by grandparent hash", "hash", parentBlock.ParentHash)
+		return false, fmt.Errorf("commitBlocks fail to get header by grandparent hash: %v", parentBlock.ParentHash)
+	}
 	_, round, _, err = x.getExtraFields(grandParentBlock)
 	if err != nil {
 		log.Error("Fail to execute second DecodeBytesExtraFields for commiting block", "parentBlockHash", parentBlock.Hash())

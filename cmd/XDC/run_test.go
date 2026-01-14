@@ -25,14 +25,6 @@ import (
 	"github.com/docker/docker/pkg/reexec"
 )
 
-func tmpdir(t *testing.T) string {
-	dir, err := os.MkdirTemp("", "XDC-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 type testXDC struct {
 	*cmdtest.TestCmd
 
@@ -66,27 +58,22 @@ func runXDC(t *testing.T, args ...string) *testXDC {
 	tt := &testXDC{}
 	tt.TestCmd = cmdtest.NewTestCmd(t, tt)
 	for i, arg := range args {
-		switch {
-		case arg == "-datadir" || arg == "--datadir":
+		switch arg {
+		case "--datadir":
 			if i < len(args)-1 {
 				tt.Datadir = args[i+1]
 			}
-		case arg == "-etherbase" || arg == "--etherbase":
+		case "--miner-etherbase":
 			if i < len(args)-1 {
 				tt.Etherbase = args[i+1]
 			}
 		}
 	}
 	if tt.Datadir == "" {
-		tt.Datadir = tmpdir(t)
+		// The temporary datadir will be removed automatically if something fails below.
+		tt.Datadir = t.TempDir()
 		tt.Cleanup = func() { os.RemoveAll(tt.Datadir) }
-		args = append([]string{"-datadir", tt.Datadir}, args...)
-		// Remove the temporary datadir if something fails below.
-		defer func() {
-			if t.Failed() {
-				tt.Cleanup()
-			}
-		}()
+		args = append([]string{"--datadir", tt.Datadir}, args...)
 	}
 
 	// Boot "XDC". This actually runs the test binary but the TestMain

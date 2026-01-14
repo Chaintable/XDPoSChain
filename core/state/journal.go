@@ -41,9 +41,9 @@ type (
 	resetObjectChange struct {
 		prev *stateObject
 	}
-	suicideChange struct {
+	selfDestructChange struct {
 		account     *common.Address
-		prev        bool // whether account had already suicided
+		prev        bool // whether account had already self-destructed
 		prevbalance *big.Int
 	}
 
@@ -88,6 +88,11 @@ type (
 		address *common.Address
 		slot    *common.Hash
 	}
+
+	transientStorageChange struct {
+		account       *common.Address
+		key, prevalue common.Hash
+	}
 )
 
 func (ch createObjectChange) undo(s *StateDB) {
@@ -99,10 +104,10 @@ func (ch resetObjectChange) undo(s *StateDB) {
 	s.setStateObject(ch.prev)
 }
 
-func (ch suicideChange) undo(s *StateDB) {
+func (ch selfDestructChange) undo(s *StateDB) {
 	obj := s.getStateObject(*ch.account)
 	if obj != nil {
-		obj.suicided = ch.prev
+		obj.selfDestructed = ch.prev
 		obj.setBalance(ch.prevbalance)
 	}
 }
@@ -132,6 +137,10 @@ func (ch codeChange) undo(s *StateDB) {
 
 func (ch storageChange) undo(s *StateDB) {
 	s.getStateObject(*ch.account).setState(ch.key, ch.prevalue)
+}
+
+func (ch transientStorageChange) undo(s *StateDB) {
+	s.setTransientState(*ch.account, ch.key, ch.prevalue)
 }
 
 func (ch refundChange) undo(s *StateDB) {

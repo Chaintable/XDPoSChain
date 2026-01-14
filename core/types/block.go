@@ -32,11 +32,6 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/rlp"
 )
 
-var (
-	EmptyRootHash  = DeriveSha(Transactions{})
-	EmptyUncleHash = CalcUncleHash(nil)
-)
-
 // A BlockNonce is a 64-bit hash which proves (combined with the
 // mix-hash) that a sufficient amount of computation has been carried
 // out on a block.
@@ -64,7 +59,7 @@ func (n *BlockNonce) UnmarshalText(input []byte) error {
 	return hexutil.UnmarshalFixedText("BlockNonce", input, n[:])
 }
 
-//go:generate gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
+//go:generate go run github.com/fjl/gencodec -type Header -field-override headerMarshaling -out gen_header_json.go
 
 // Header represents a block header in the Ethereum blockchain.
 type Header struct {
@@ -86,6 +81,9 @@ type Header struct {
 	Validators  []byte         `json:"validators"       gencodec:"required"`
 	Validator   []byte         `json:"validator"        gencodec:"required"`
 	Penalties   []byte         `json:"penalties"        gencodec:"required"`
+
+	// BaseFee was added by EIP-1559 and is ignored in legacy headers.
+	BaseFee *big.Int `json:"baseFeePerGas" rlp:"optional"`
 }
 
 // field type overrides for gencodec
@@ -96,6 +94,7 @@ type headerMarshaling struct {
 	GasUsed    hexutil.Uint64
 	Time       *hexutil.Big
 	Extra      hexutil.Bytes
+	BaseFee    *hexutil.Big
 	Hash       common.Hash `json:"hash"` // adds call to Hash() in MarshalJSON
 }
 
@@ -161,7 +160,23 @@ type Body struct {
 	Uncles       []*Header
 }
 
-// Block represents an entire block in the Ethereum blockchain.
+// Block represents an Ethereum block.
+//
+// Note the Block type tries to be 'immutable', and contains certain caches that rely
+// on that. The rules around block immutability are as follows:
+//
+//   - We copy all data when the block is constructed. This makes references held inside
+//     the block independent of whatever value was passed in.
+//
+//   - We copy all header data on access. This is because any change to the header would mess
+//     up the cached hash and size values in the block. Calling code is expected to take
+//     advantage of this to avoid over-allocating!
+//
+//   - When new body data is attached to the block, a shallow copy of the block is returned.
+//     This ensures block modifications are race-free.
+//
+//   - We do not copy body data on access because it does not affect the caches, and also
+//     because it would be too expensive.
 type Block struct {
 	header       *Header
 	uncles       []*Header
@@ -217,22 +232,22 @@ type storageblock struct {
 // The values of TxHash, UncleHash, ReceiptHash and Bloom in header
 // are ignored and set to values derived from the given txs, uncles
 // and receipts.
-func NewBlock(header *Header, txs []*Transaction, uncles []*Header, receipts []*Receipt) *Block {
+func NewBlock(header *Header, txs []*Transaction, uncles []*Header, receipts []*Receipt, hasher TrieHasher) *Block {
 	b := &Block{header: CopyHeader(header), td: new(big.Int)}
 
 	// TODO: panic if len(txs) != len(receipts)
 	if len(txs) == 0 {
-		b.header.TxHash = EmptyRootHash
+		b.header.TxHash = EmptyTxsHash
 	} else {
-		b.header.TxHash = DeriveSha(Transactions(txs))
+		b.header.TxHash = DeriveSha(Transactions(txs), hasher)
 		b.transactions = make(Transactions, len(txs))
 		copy(b.transactions, txs)
 	}
 
 	if len(receipts) == 0 {
-		b.header.ReceiptHash = EmptyRootHash
+		b.header.ReceiptHash = EmptyReceiptsHash
 	} else {
-		b.header.ReceiptHash = DeriveSha(Receipts(receipts))
+		b.header.ReceiptHash = DeriveSha(Receipts(receipts), hasher)
 		b.header.Bloom = CreateBloom(receipts)
 	}
 
@@ -256,8 +271,7 @@ func NewBlockWithHeader(header *Header) *Block {
 	return &Block{header: CopyHeader(header)}
 }
 
-// CopyHeader creates a deep copy of a block header to prevent side effects from
-// modifying a header variable.
+// CopyHeader creates a deep copy of a block header.
 func CopyHeader(h *Header) *Header {
 	cpy := *h
 	if cpy.Time = new(big.Int); h.Time != nil {
@@ -268,6 +282,9 @@ func CopyHeader(h *Header) *Header {
 	}
 	if cpy.Number = new(big.Int); h.Number != nil {
 		cpy.Number.Set(h.Number)
+	}
+	if h.BaseFee != nil {
+		cpy.BaseFee = new(big.Int).Set(h.BaseFee)
 	}
 	if len(h.Extra) > 0 {
 		cpy.Extra = make([]byte, len(h.Extra))
@@ -280,7 +297,7 @@ func CopyHeader(h *Header) *Header {
 	return &cpy
 }
 
-// DecodeRLP decodes the Ethereum
+// DecodeRLP decodes a block from RLP.
 func (b *Block) DecodeRLP(s *rlp.Stream) error {
 	var eb extblock
 	_, size, _ := s.Kind()
@@ -292,7 +309,7 @@ func (b *Block) DecodeRLP(s *rlp.Stream) error {
 	return nil
 }
 
-// EncodeRLP serializes b into the Ethereum RLP block format.
+// EncodeRLP serializes a block as RLP.
 func (b *Block) EncodeRLP(w io.Writer) error {
 	return rlp.Encode(w, extblock{
 		Header: b.header,
@@ -311,7 +328,14 @@ func (b *StorageBlock) DecodeRLP(s *rlp.Stream) error {
 	return nil
 }
 
-// TODO: copies
+// Body returns the non-header content of the block.
+// Note the returned data is not an independent copy.
+func (b *Block) Body() *Body {
+	return &Body{b.transactions, b.uncles}
+}
+
+// Accessors for body data. These do not return a copy because the content
+// of the body slices does not affect the cached hash/size in block.
 
 func (b *Block) Uncles() []*Header          { return b.uncles }
 func (b *Block) Transactions() Transactions { return b.transactions }
@@ -324,6 +348,13 @@ func (b *Block) Transaction(hash common.Hash) *Transaction {
 	}
 	return nil
 }
+
+// Header returns the block header (as a copy).
+func (b *Block) Header() *Header {
+	return CopyHeader(b.header)
+}
+
+// Header value accessors. These do copy!
 
 func (b *Block) Number() *big.Int     { return new(big.Int).Set(b.header.Number) }
 func (b *Block) GasLimit() uint64     { return b.header.GasLimit }
@@ -345,10 +376,12 @@ func (b *Block) Extra() []byte            { return common.CopyBytes(b.header.Ext
 func (b *Block) Penalties() []byte        { return common.CopyBytes(b.header.Penalties) }
 func (b *Block) Validator() []byte        { return common.CopyBytes(b.header.Validator) }
 
-func (b *Block) Header() *Header { return CopyHeader(b.header) }
-
-// Body returns the non-header content of the block.
-func (b *Block) Body() *Body { return &Body{b.transactions, b.uncles} }
+func (b *Block) BaseFee() *big.Int {
+	if b.header.BaseFee == nil {
+		return nil
+	}
+	return new(big.Int).Set(b.header.BaseFee)
+}
 
 func (b *Block) HashNoNonce() common.Hash {
 	return b.header.HashNoNonce()
@@ -383,10 +416,8 @@ func CalcUncleHash(uncles []*Header) common.Hash {
 // WithSeal returns a new block with the data from b but the header replaced with
 // the sealed one.
 func (b *Block) WithSeal(header *Header) *Block {
-	cpy := *header
-
 	return &Block{
-		header:       &cpy,
+		header:       CopyHeader(header),
 		transactions: b.transactions,
 		uncles:       b.uncles,
 	}
@@ -455,10 +486,10 @@ type Blocks []*Block
 
 type BlockBy func(b1, b2 *Block) bool
 
-func (self BlockBy) Sort(blocks Blocks) {
+func (bb BlockBy) Sort(blocks Blocks) {
 	bs := blockSorter{
 		blocks: blocks,
-		by:     self,
+		by:     bb,
 	}
 	sort.Sort(bs)
 }
@@ -468,10 +499,12 @@ type blockSorter struct {
 	by     func(b1, b2 *Block) bool
 }
 
-func (self blockSorter) Len() int { return len(self.blocks) }
-func (self blockSorter) Swap(i, j int) {
-	self.blocks[i], self.blocks[j] = self.blocks[j], self.blocks[i]
+func (bs blockSorter) Len() int { return len(bs.blocks) }
+
+func (bs blockSorter) Swap(i, j int) {
+	bs.blocks[i], bs.blocks[j] = bs.blocks[j], bs.blocks[i]
 }
-func (self blockSorter) Less(i, j int) bool { return self.by(self.blocks[i], self.blocks[j]) }
+
+func (bs blockSorter) Less(i, j int) bool { return bs.by(bs.blocks[i], bs.blocks[j]) }
 
 func Number(b1, b2 *Block) bool { return b1.header.Number.Cmp(b2.header.Number) < 0 }

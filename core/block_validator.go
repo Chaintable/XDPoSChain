@@ -29,6 +29,7 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/params"
+	"github.com/XinFinOrg/XDPoSChain/trie"
 )
 
 // BlockValidator is responsible for validating block headers, uncles and
@@ -51,19 +52,13 @@ func NewBlockValidator(config *params.ChainConfig, blockchain *BlockChain, engin
 	return validator
 }
 
-// ValidateBody validates the given block's uncles and verifies the the block
+// ValidateBody validates the given block's uncles and verifies the block
 // header's transaction and uncle roots. The headers are assumed to be already
 // validated at this point.
 func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	// Check whether the block's known, and if not, that it's linkable
 	if v.bc.HasBlockAndFullState(block.Hash(), block.NumberU64()) {
 		return ErrKnownBlock
-	}
-	if !v.bc.HasBlockAndFullState(block.ParentHash(), block.NumberU64()-1) {
-		if !v.bc.HasBlock(block.ParentHash(), block.NumberU64()-1) {
-			return consensus.ErrUnknownAncestor
-		}
-		return consensus.ErrPrunedAncestor
 	}
 	// Header validity is known at this point, check the uncles and transactions
 	header := block.Header()
@@ -73,8 +68,14 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 	if hash := types.CalcUncleHash(block.Uncles()); hash != header.UncleHash {
 		return fmt.Errorf("uncle root hash mismatch: have %x, want %x", hash, header.UncleHash)
 	}
-	if hash := types.DeriveSha(block.Transactions()); hash != header.TxHash {
+	if hash := types.DeriveSha(block.Transactions(), trie.NewStackTrie(nil)); hash != header.TxHash {
 		return fmt.Errorf("transaction root hash mismatch: have %x, want %x", hash, header.TxHash)
+	}
+	if !v.bc.HasBlockAndFullState(block.ParentHash(), block.NumberU64()-1) {
+		if !v.bc.HasBlock(block.ParentHash(), block.NumberU64()-1) {
+			return consensus.ErrUnknownAncestor
+		}
+		return consensus.ErrPrunedAncestor
 	}
 	return nil
 }
@@ -95,7 +96,7 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 		return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
 	}
 	// Tre receipt Trie's root (R = (Tr [[H1, R1], ... [Hn, R1]]))
-	receiptSha := types.DeriveSha(receipts)
+	receiptSha := types.DeriveSha(receipts, trie.NewStackTrie(nil))
 	if receiptSha != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
 	}

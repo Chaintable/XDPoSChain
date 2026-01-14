@@ -52,7 +52,7 @@ type accountMarshaling struct {
 }
 
 // storageJSON represents a 256 bit byte array, but allows less than 256 bits when
-// unmarshalling from hex.
+// unmarshaling from hex.
 type storageJSON common.Hash
 
 func (h *storageJSON) UnmarshalText(text []byte) error {
@@ -62,6 +62,7 @@ func (h *storageJSON) UnmarshalText(text []byte) error {
 	}
 	offset := len(h) - len(text)/2 // pad on the left
 	if _, err := hex.Decode(h[offset:], text); err != nil {
+		fmt.Println(err)
 		return fmt.Errorf("invalid hex storage key/value %q", text)
 	}
 	return nil
@@ -71,7 +72,7 @@ func (h storageJSON) MarshalText() ([]byte, error) {
 	return hexutil.Bytes(h[:]).MarshalText()
 }
 
-// GenesisAlloc specifies the initial state of a genesis block.
+// GenesisAlloc specifies the initial state that is part of the genesis block.
 type GenesisAlloc map[common.Address]Account
 
 func (ga *GenesisAlloc) UnmarshalJSON(data []byte) error {

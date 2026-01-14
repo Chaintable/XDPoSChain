@@ -16,7 +16,6 @@
 package validator
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -29,14 +28,13 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/accounts/abi/bind"
 	"github.com/XinFinOrg/XDPoSChain/accounts/abi/bind/backends"
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/common/hexutil"
 	contractValidator "github.com/XinFinOrg/XDPoSChain/contracts/validator/contract"
-	"github.com/XinFinOrg/XDPoSChain/core"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/params"
-	"github.com/XinFinOrg/XDPoSChain/rlp"
 )
 
 var (
@@ -53,7 +51,7 @@ var (
 )
 
 func TestValidator(t *testing.T) {
-	contractBackend := backends.NewXDCSimulatedBackend(core.GenesisAlloc{addr: {Balance: big.NewInt(1000000000)}}, 10000000, params.TestXDPoSMockChainConfig)
+	contractBackend := backends.NewXDCSimulatedBackend(types.GenesisAlloc{addr: {Balance: big.NewInt(1000000000)}}, 10000000, params.TestXDPoSMockChainConfig)
 	transactOpts := bind.NewKeyedTransactor(key)
 
 	validatorCap := new(big.Int)
@@ -68,7 +66,7 @@ func TestValidator(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), d)
 	defer cancel()
 	code, _ := contractBackend.CodeAt(ctx, validatorAddress, nil)
-	t.Log("contract code", common.ToHex(code))
+	t.Log("contract code", hexutil.Encode(code))
 	f := func(key, val common.Hash) bool {
 		t.Log(key.Hex(), val.Hex())
 		return true
@@ -89,7 +87,7 @@ func TestValidator(t *testing.T) {
 }
 
 func TestRewardBalance(t *testing.T) {
-	contractBackend := backends.NewXDCSimulatedBackend(core.GenesisAlloc{
+	contractBackend := backends.NewXDCSimulatedBackend(types.GenesisAlloc{
 		acc1Addr: {Balance: new(big.Int).SetUint64(10000000)},
 		acc2Addr: {Balance: new(big.Int).SetUint64(10000000)},
 		acc4Addr: {Balance: new(big.Int).SetUint64(10000000)},
@@ -273,7 +271,7 @@ func TestStatedbUtils(t *testing.T) {
 	validatorCap.SetString("50000000000000000000000", 10)
 	voteAmount := new(big.Int)
 	voteAmount.SetString("25000000000000000000000", 10)
-	genesisAlloc := core.GenesisAlloc{
+	genesisAlloc := types.GenesisAlloc{
 		addr:     {Balance: big.NewInt(1000000000)},
 		acc1Addr: {Balance: validatorCap},
 		acc2Addr: {Balance: validatorCap},
@@ -300,16 +298,11 @@ func TestStatedbUtils(t *testing.T) {
 	code, _ := contractBackend.CodeAt(ctx, validatorAddress, nil)
 	storage := make(map[common.Hash]common.Hash)
 	f := func(key, val common.Hash) bool {
-		decode := []byte{}
-		trim := bytes.TrimLeft(val.Bytes(), "\x00")
-		rlp.DecodeBytes(trim, &decode)
-		storage[key] = common.BytesToHash(decode)
-		// t.Log("DecodeBytes", "value", val.String(), "decode", storage[key].String())
-		// t.Log("key", key.String(), "value", storage[key].String())
+		storage[key] = val
 		return true
 	}
 	contractBackend.ForEachStorageAt(ctx, validatorAddress, nil, f)
-	genesisAlloc[common.MasternodeVotingSMCBinary] = core.GenesisAccount{
+	genesisAlloc[common.MasternodeVotingSMCBinary] = types.Account{
 		Balance: validatorCap,
 		Code:    code,
 		Storage: storage,
@@ -319,7 +312,7 @@ func TestStatedbUtils(t *testing.T) {
 	if err != nil {
 		t.Fatalf("can't get validator object: %v", err)
 	}
-	statedb, err := contractBackendForValidator.GetBlockChain().State()
+	statedb, err := contractBackendForValidator.BlockChain().State()
 	if err != nil {
 		t.Fatalf("can't get statedb: %v", err)
 	}

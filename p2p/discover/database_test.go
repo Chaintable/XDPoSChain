@@ -19,7 +19,6 @@ package discover
 import (
 	"bytes"
 	"net"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -56,14 +55,14 @@ var nodeDBKeyTests = []struct {
 func TestNodeDBKeys(t *testing.T) {
 	for i, tt := range nodeDBKeyTests {
 		if key := makeKey(tt.id, tt.field); !bytes.Equal(key, tt.key) {
-			t.Errorf("make test %d: key mismatch: have 0x%x, want 0x%x", i, key, tt.key)
+			t.Errorf("make test %d: key mismatch: have %#x, want %#x", i, key, tt.key)
 		}
 		id, field := splitKey(tt.key)
 		if !bytes.Equal(id[:], tt.id[:]) {
-			t.Errorf("split test %d: id mismatch: have 0x%x, want 0x%x", i, id, tt.id)
+			t.Errorf("split test %d: id mismatch: have %#x, want %#x", i, id, tt.id)
 		}
 		if field != tt.field {
-			t.Errorf("split test %d: field mismatch: have 0x%x, want 0x%x", i, field, tt.field)
+			t.Errorf("split test %d: field mismatch: have %#x, want %#x", i, field, tt.field)
 		}
 	}
 }
@@ -254,11 +253,7 @@ func TestNodeDBSeedQuery(t *testing.T) {
 }
 
 func TestNodeDBPersistency(t *testing.T) {
-	root, err := os.MkdirTemp("", "nodedb-")
-	if err != nil {
-		t.Fatalf("failed to create temporary data folder: %v", err)
-	}
-	defer os.RemoveAll(root)
+	root := t.TempDir()
 
 	var (
 		testKey = []byte("somekey")

@@ -25,8 +25,8 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/accounts/keystore"
 	"github.com/XinFinOrg/XDPoSChain/cmd/utils"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
-	"github.com/pborman/uuid"
-	"gopkg.in/urfave/cli.v1"
+	"github.com/google/uuid"
+	"github.com/urfave/cli/v2"
 )
 
 type outputGenerate struct {
@@ -34,7 +34,14 @@ type outputGenerate struct {
 	AddressEIP55 string
 }
 
-var commandGenerate = cli.Command{
+var (
+	privateKeyFlag = &cli.StringFlag{
+		Name:  "privatekey",
+		Usage: "file containing a raw private key to encrypt",
+	}
+)
+
+var commandGenerate = &cli.Command{
 	Name:      "generate",
 	Usage:     "generate new keyfile",
 	ArgsUsage: "[ <keyfile> ]",
@@ -47,10 +54,7 @@ If you want to encrypt an existing private key, it can be specified by setting
 	Flags: []cli.Flag{
 		passphraseFlag,
 		jsonFlag,
-		cli.StringFlag{
-			Name:  "privatekey",
-			Usage: "file containing a raw private key to encrypt",
-		},
+		privateKeyFlag,
 	},
 	Action: func(ctx *cli.Context) error {
 		// Check if keyfile path given and make sure it doesn't already exist.
@@ -81,9 +85,12 @@ If you want to encrypt an existing private key, it can be specified by setting
 		}
 
 		// Create the keyfile object with a random UUID.
-		id := uuid.NewRandom()
+		UUID, err := uuid.NewRandom()
+		if err != nil {
+			utils.Fatalf("Failed to generate random uuid: %v", err)
+		}
 		key := &keystore.Key{
-			Id:         id,
+			Id:         UUID,
 			Address:    crypto.PubkeyToAddress(privateKey.PublicKey),
 			PrivateKey: privateKey,
 		}

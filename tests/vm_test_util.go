@@ -29,6 +29,7 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/core"
 	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
+	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/core/vm"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/params"
@@ -50,12 +51,12 @@ type vmJSON struct {
 	Logs          common.UnprefixedHash `json:"logs"`
 	GasRemaining  *math.HexOrDecimal64  `json:"gas"`
 	Out           hexutil.Bytes         `json:"out"`
-	Pre           core.GenesisAlloc     `json:"pre"`
-	Post          core.GenesisAlloc     `json:"post"`
+	Pre           types.GenesisAlloc    `json:"pre"`
+	Post          types.GenesisAlloc    `json:"post"`
 	PostStateRoot common.Hash           `json:"postStateRoot"`
 }
 
-//go:generate gencodec -type vmExec -field-override vmExecMarshaling -out gen_vmexec.go
+//go:generate go run github.com/fjl/gencodec -type vmExec -field-override vmExecMarshaling -out gen_vmexec.go
 
 type vmExec struct {
 	Address  common.Address `json:"address"  gencodec:"required"`
@@ -132,19 +133,21 @@ func (t *VMTest) newEVM(statedb *state.StateDB, vmconfig vm.Config) *vm.EVM {
 		return core.CanTransfer(db, address, amount)
 	}
 	transfer := func(db vm.StateDB, sender, recipient common.Address, amount *big.Int) {}
-	context := vm.Context{
+	txContext := vm.TxContext{
+		Origin:   t.json.Exec.Origin,
+		GasPrice: t.json.Exec.GasPrice,
+	}
+	context := vm.BlockContext{
 		CanTransfer: canTransfer,
 		Transfer:    transfer,
 		GetHash:     vmTestBlockHash,
-		Origin:      t.json.Exec.Origin,
 		Coinbase:    t.json.Env.Coinbase,
 		BlockNumber: new(big.Int).SetUint64(t.json.Env.Number),
 		Time:        new(big.Int).SetUint64(t.json.Env.Timestamp),
 		GasLimit:    t.json.Env.GasLimit,
 		Difficulty:  t.json.Env.Difficulty,
-		GasPrice:    t.json.Exec.GasPrice,
 	}
-	return vm.NewEVM(context, statedb, nil, params.MainnetChainConfig, vmconfig)
+	return vm.NewEVM(context, txContext, statedb, nil, params.MainnetChainConfig, vmconfig)
 }
 
 func vmTestBlockHash(n uint64) common.Hash {

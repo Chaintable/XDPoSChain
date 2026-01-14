@@ -14,18 +14,18 @@ import (
 
 	"github.com/XinFinOrg/XDPoSChain/accounts"
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/common/lru"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
-
 	"github.com/XinFinOrg/XDPoSChain/consensus/XDPoS/utils"
 	"github.com/XinFinOrg/XDPoSChain/consensus/clique"
-	"github.com/XinFinOrg/XDPoSChain/consensus/misc"
+	"github.com/XinFinOrg/XDPoSChain/consensus/misc/eip1559"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/ethdb"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/params"
-	lru "github.com/hashicorp/golang-lru"
+	"github.com/XinFinOrg/XDPoSChain/trie"
 )
 
 const (
@@ -43,17 +43,17 @@ type XDPoS_v1 struct {
 	config *params.XDPoSConfig // Consensus engine configuration parameters
 	db     ethdb.Database      // Database to store and retrieve snapshot checkpoints
 
-	recents             *lru.ARCCache // Snapshots for recent block to speed up reorgs
-	signatures          *lru.ARCCache // Signatures of recent blocks to speed up mining
-	validatorSignatures *lru.ARCCache // Signatures of recent blocks to speed up mining
-	verifiedHeaders     *lru.ARCCache
+	recents             *lru.Cache[common.Hash, *SnapshotV1] // Snapshots for recent block to speed up reorgs
+	signatures          *utils.SigLRU                        // Signatures of recent blocks to speed up mining
+	validatorSignatures *utils.SigLRU                        // Signatures of recent blocks to speed up mining
+	verifiedHeaders     *lru.Cache[common.Hash, struct{}]
 	proposals           map[common.Address]bool // Current list of proposals we are pushing
 
 	signer common.Address  // Ethereum address of the signing key
 	signFn clique.SignerFn // Signer function to authorize hashes with
 	lock   sync.RWMutex    // Protects the signer fields
 
-	HookReward            func(chain consensus.ChainReader, state *state.StateDB, parentState *state.StateDB, header *types.Header) (error, map[string]interface{})
+	HookReward            func(chain consensus.ChainReader, state *state.StateDB, parentState *state.StateDB, header *types.Header) (map[string]interface{}, error)
 	HookPenalty           func(chain consensus.ChainReader, blockNumberEpoc uint64) ([]common.Address, error)
 	HookPenaltyTIPSigning func(chain consensus.ChainReader, header *types.Header, candidate []common.Address) ([]common.Address, error)
 	HookValidator         func(header *types.Header, signers []common.Address) ([]byte, error)
@@ -91,20 +91,16 @@ func New(chainConfig *params.ChainConfig, db ethdb.Database) *XDPoS_v1 {
 		conf.Epoch = utils.EpochLength
 	}
 
-	recents, _ := lru.NewARC(utils.InmemorySnapshots)
-	signatures, _ := lru.NewARC(utils.InmemorySnapshots)
-	validatorSignatures, _ := lru.NewARC(utils.InmemorySnapshots)
-	verifiedHeaders, _ := lru.NewARC(utils.InmemorySnapshots)
 	return &XDPoS_v1{
 		chainConfig: chainConfig,
 
 		config: &conf,
 		db:     db,
 
-		recents:             recents,
-		signatures:          signatures,
-		verifiedHeaders:     verifiedHeaders,
-		validatorSignatures: validatorSignatures,
+		recents:             lru.NewCache[common.Hash, *SnapshotV1](utils.InMemorySnapshots),
+		signatures:          lru.NewCache[common.Hash, common.Address](utils.InMemorySnapshots),
+		verifiedHeaders:     lru.NewCache[common.Hash, struct{}](utils.InMemorySnapshots),
+		validatorSignatures: lru.NewCache[common.Hash, common.Address](utils.InMemorySnapshots),
 		proposals:           make(map[common.Address]bool),
 	}
 }
@@ -116,8 +112,8 @@ func (x *XDPoS_v1) Author(header *types.Header) (common.Address, error) {
 }
 
 // VerifyHeader checks whether a header conforms to the consensus rules.
-func (x *XDPoS_v1) VerifyHeader(chain consensus.ChainReader, header *types.Header, fullVerify bool) error {
-	return x.verifyHeaderWithCache(chain, header, nil, fullVerify)
+func (x *XDPoS_v1) VerifyHeader(chain consensus.ChainReader, header *types.Header, fullVerify bool, verifyCheckpoint bool) error {
+	return x.verifyHeaderWithCache(chain, header, nil, fullVerify, verifyCheckpoint)
 }
 
 // VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers. The
@@ -126,7 +122,7 @@ func (x *XDPoS_v1) VerifyHeader(chain consensus.ChainReader, header *types.Heade
 func (x *XDPoS_v1) VerifyHeaders(chain consensus.ChainReader, headers []*types.Header, fullVerifies []bool, abort <-chan struct{}, results chan<- error) {
 	go func() {
 		for i, header := range headers {
-			err := x.verifyHeaderWithCache(chain, header, headers[:i], fullVerifies[i])
+			err := x.verifyHeaderWithCache(chain, header, headers[:i], fullVerifies[i], true)
 
 			select {
 			case <-abort:
@@ -137,14 +133,14 @@ func (x *XDPoS_v1) VerifyHeaders(chain consensus.ChainReader, headers []*types.H
 	}()
 }
 
-func (x *XDPoS_v1) verifyHeaderWithCache(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool) error {
-	_, check := x.verifiedHeaders.Get(header.Hash())
-	if check {
+func (x *XDPoS_v1) verifyHeaderWithCache(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool, verifyCheckpoint bool) error {
+	_, ok := x.verifiedHeaders.Get(header.Hash())
+	if ok {
 		return nil
 	}
-	err := x.verifyHeader(chain, header, parents, fullVerify)
+	err := x.verifyHeader(chain, header, parents, fullVerify, verifyCheckpoint)
 	if err == nil {
-		x.verifiedHeaders.Add(header.Hash(), true)
+		x.verifiedHeaders.Add(header.Hash(), struct{}{})
 	}
 	return err
 }
@@ -153,7 +149,7 @@ func (x *XDPoS_v1) verifyHeaderWithCache(chain consensus.ChainReader, header *ty
 // caller may optionally pass in a batch of parents (ascending order) to avoid
 // looking those up from the database. This is useful for concurrently verifying
 // a batch of new headers.
-func (x *XDPoS_v1) verifyHeader(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool) error {
+func (x *XDPoS_v1) verifyHeader(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool, verifyCheckpoint bool) error {
 	// If we're running a engine faking, accept any block as valid
 	if x.config.SkipV1Validation {
 		return nil
@@ -210,19 +206,15 @@ func (x *XDPoS_v1) verifyHeader(chain consensus.ChainReader, header *types.Heade
 	if header.UncleHash != utils.UncleHash {
 		return utils.ErrInvalidUncleHash
 	}
-	// If all checks passed, validate any special fields for hard forks
-	if err := misc.VerifyForkHashes(chain.Config(), header, false); err != nil {
-		return err
-	}
 	// All basic checks passed, verify cascading fields
-	return x.verifyCascadingFields(chain, header, parents, fullVerify)
+	return x.verifyCascadingFields(chain, header, parents, fullVerify, verifyCheckpoint)
 }
 
 // verifyCascadingFields verifies all the header fields that are not standalone,
 // rather depend on a batch of previous headers. The caller may optionally pass
 // in a batch of parents (ascending order) to avoid looking those up from the
 // database. This is useful for concurrently verifying a batch of new headers.
-func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool) error {
+func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *types.Header, parents []*types.Header, fullVerify bool, verifyCheckpoint bool) error {
 	// The genesis block is the always valid dead-end
 	number := header.Number.Uint64()
 	if number == 0 {
@@ -241,6 +233,10 @@ func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *ty
 	if parent.Time.Uint64()+x.config.Period > header.Time.Uint64() {
 		return utils.ErrInvalidTimestamp
 	}
+	// Verify the header's EIP-1559 attributes.
+	if err := eip1559.VerifyEip1559Header(chain.Config(), header); err != nil {
+		return err
+	}
 
 	if number%x.config.Epoch != 0 {
 		return x.verifySeal(chain, header, parents, fullVerify)
@@ -257,7 +253,7 @@ func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *ty
 	}
 
 	signers := snap.GetSigners()
-	err = x.checkSignersOnCheckpoint(chain, header, signers)
+	err = x.checkSignersOnCheckpoint(chain, header, signers, verifyCheckpoint)
 	if err == nil {
 		return x.verifySeal(chain, header, parents, fullVerify)
 	}
@@ -266,7 +262,7 @@ func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *ty
 	if err != nil {
 		return err
 	}
-	err = x.checkSignersOnCheckpoint(chain, header, signers)
+	err = x.checkSignersOnCheckpoint(chain, header, signers, verifyCheckpoint)
 	if err == nil {
 		return x.verifySeal(chain, header, parents, fullVerify)
 	}
@@ -274,10 +270,10 @@ func (x *XDPoS_v1) verifyCascadingFields(chain consensus.ChainReader, header *ty
 	return err
 }
 
-func (x *XDPoS_v1) checkSignersOnCheckpoint(chain consensus.ChainReader, header *types.Header, signers []common.Address) error {
+func (x *XDPoS_v1) checkSignersOnCheckpoint(chain consensus.ChainReader, header *types.Header, signers []common.Address, verifyCheckpoint bool) error {
 	number := header.Number.Uint64()
 	// ignore signerCheck at checkpoint block.
-	if common.IgnoreSignerCheckBlockArray[number] {
+	if common.IsIgnoreSignerCheckBlock(number) {
 		return nil
 	}
 	penPenalties := []common.Address{}
@@ -305,6 +301,12 @@ func (x *XDPoS_v1) checkSignersOnCheckpoint(chain consensus.ChainReader, header 
 			signers = removePenaltiesFromBlock(chain, signers, number-uint64(i)*x.config.Epoch)
 		}
 	}
+
+	// fix issue #1185
+	if !verifyCheckpoint {
+		return nil
+	}
+
 	extraSuffix := len(header.Extra) - utils.ExtraSeal
 	masternodesFromCheckpointHeader := common.ExtractAddressFromBytes(header.Extra[utils.ExtraVanity:extraSuffix])
 	validSigners := utils.CompareSignersLists(masternodesFromCheckpointHeader, signers)
@@ -394,7 +396,7 @@ func (x *XDPoS_v1) GetPeriod() uint64 { return x.config.Period }
 
 func (x *XDPoS_v1) whoIsCreator(snap *SnapshotV1, header *types.Header) (common.Address, error) {
 	if header.Number.Uint64() == 0 {
-		return common.Address{}, errors.New("Don't take block 0")
+		return common.Address{}, errors.New("don't take block 0")
 	}
 	m, err := ecrecover(header, snap.sigcache)
 	if err != nil {
@@ -403,7 +405,7 @@ func (x *XDPoS_v1) whoIsCreator(snap *SnapshotV1, header *types.Header) (common.
 	return m, nil
 }
 func (x *XDPoS_v1) YourTurn(chain consensus.ChainReader, parent *types.Header, signer common.Address) (bool, error) {
-	len, preIndex, curIndex, ok, err := x.yourTurn(chain, parent, signer)
+	length, preIndex, curIndex, ok, err := x.yourTurn(chain, parent, signer)
 
 	if err != nil {
 		log.Warn("Failed when trying to commit new work", "err", err)
@@ -419,7 +421,7 @@ func (x *XDPoS_v1) YourTurn(chain consensus.ChainReader, parent *types.Header, s
 			// you're not allowed to create this block
 			return false, nil
 		}
-		h := utils.Hop(len, preIndex, curIndex)
+		h := utils.Hop(length, preIndex, curIndex)
 		gap := minePeriod * int64(h)
 		// Check nearest checkpoint block in hop range.
 		nearest := x.config.Epoch - (parent.Number.Uint64() % x.config.Epoch)
@@ -444,7 +446,7 @@ func (x *XDPoS_v1) yourTurn(chain consensus.ChainReader, parent *types.Header, s
 		return 0, -1, -1, false, err
 	}
 	if len(masternodes) == 0 {
-		return 0, -1, -1, false, errors.New("Masternodes not found")
+		return 0, -1, -1, false, errors.New("masternodes not found")
 	}
 	pre := common.Address{}
 	// masternode[0] has chance to create block 1
@@ -476,10 +478,10 @@ func (x *XDPoS_v1) snapshot(chain consensus.ChainReader, number uint64, hash com
 		headers []*types.Header
 		snap    *SnapshotV1
 	)
-	for snap == nil {
+	for {
 		// If an in-memory SnapshotV1 was found, use that
-		if s, ok := x.recents.Get(hash); ok {
-			snap = s.(*SnapshotV1)
+		if s, ok := x.recents.Get(hash); ok && s != nil {
+			snap = s
 			break
 		}
 		// If an on-disk checkpoint snapshot can be found, use that
@@ -494,7 +496,7 @@ func (x *XDPoS_v1) snapshot(chain consensus.ChainReader, number uint64, hash com
 		// If we're at block zero, make a snapshot
 		if number == 0 {
 			genesis := chain.GetHeaderByNumber(0)
-			if err := x.VerifyHeader(chain, genesis, true); err != nil {
+			if err := x.VerifyHeader(chain, genesis, true, true); err != nil {
 				return nil, err
 			}
 			signers := make([]common.Address, (len(genesis.Extra)-utils.ExtraVanity-utils.ExtraSeal)/common.AddressLength)
@@ -788,6 +790,9 @@ func (x *XDPoS_v1) Prepare(chain consensus.ChainReader, header *types.Header) er
 
 // Update masternodes into snapshot. In V1, truncating ms[:MaxMasternodes] is done in this function.
 func (x *XDPoS_v1) UpdateMasternodes(chain consensus.ChainReader, header *types.Header, ms []utils.Masternode) error {
+	number := header.Number.Uint64()
+	log.Trace("take snapshot", "number", number, "hash", header.Hash())
+
 	var maxMasternodes int
 	// check if block number is increase ms checkpoint
 	if x.chainConfig.IsTIPIncreaseMasternodes(header.Number) || (x.config.V2.SwitchBlock != nil && header.Number.Cmp(x.config.V2.SwitchBlock) == 1) {
@@ -800,8 +805,6 @@ func (x *XDPoS_v1) UpdateMasternodes(chain consensus.ChainReader, header *types.
 	if len(ms) > maxMasternodes {
 		ms = ms[:maxMasternodes]
 	}
-	number := header.Number.Uint64()
-	log.Trace("take snapshot", "number", number, "hash", header.Hash())
 	// get snapshot
 	snap, err := x.snapshot(chain, number, header.Hash(), nil, header)
 	if err != nil {
@@ -834,7 +837,7 @@ func (x *XDPoS_v1) Finalize(chain consensus.ChainReader, header *types.Header, s
 	// _ = c.CacheData(header, txs, receipts)
 
 	if x.HookReward != nil && number%rCheckpoint == 0 {
-		err, rewards := x.HookReward(chain, state, parentState, header)
+		rewards, err := x.HookReward(chain, state, parentState, header)
 		if err != nil {
 			return nil, err
 		}
@@ -854,7 +857,7 @@ func (x *XDPoS_v1) Finalize(chain consensus.ChainReader, header *types.Header, s
 	header.UncleHash = types.CalcUncleHash(nil)
 
 	// Assemble and return the final block for sealing
-	return types.NewBlock(header, txs, nil, receipts), nil
+	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }
 
 // Authorize injects a private key into the consensus engine to mint new blocks
@@ -959,11 +962,11 @@ func (x *XDPoS_v1) calcDifficulty(chain consensus.ChainReader, parent *types.Hea
 	if x.config.SkipV1Validation {
 		return big.NewInt(1)
 	}
-	len, preIndex, curIndex, _, err := x.yourTurn(chain, parent, signer)
+	length, preIndex, curIndex, _, err := x.yourTurn(chain, parent, signer)
 	if err != nil {
-		return big.NewInt(int64(len + curIndex - preIndex))
+		return big.NewInt(int64(length + curIndex - preIndex))
 	}
-	return big.NewInt(int64(len - utils.Hop(len, preIndex, curIndex)))
+	return big.NewInt(int64(length - utils.Hop(length, preIndex, curIndex)))
 }
 
 func (x *XDPoS_v1) RecoverSigner(header *types.Header) (common.Address, error) {
@@ -974,7 +977,7 @@ func (x *XDPoS_v1) RecoverValidator(header *types.Header) (common.Address, error
 	// If the signature's already cached, return that
 	hash := header.Hash()
 	if address, known := x.validatorSignatures.Get(hash); known {
-		return address.(common.Address), nil
+		return address, nil
 	}
 	// Retrieve the signature from the header.Validator
 	// len equals 65 bytes
@@ -1029,7 +1032,7 @@ func (x *XDPoS_v1) getSignersFromContract(chain consensus.ChainReader, checkpoin
 	}
 	signers, err := x.HookGetSignersFromContract(startGapBlockHeader.Hash())
 	if err != nil {
-		return []common.Address{}, fmt.Errorf("Can't get signers from Smart Contract . Err: %v", err)
+		return []common.Address{}, fmt.Errorf("can't get signers from Smart Contract . Err: %v", err)
 	}
 	return signers, nil
 }
@@ -1039,20 +1042,15 @@ func NewFaker(db ethdb.Database, chainConfig *params.ChainConfig) *XDPoS_v1 {
 	// Set any missing consensus parameters to their defaults
 	conf := chainConfig.XDPoS
 
-	// Allocate the snapshot caches and create the engine
-	recents, _ := lru.NewARC(utils.InmemorySnapshots)
-	signatures, _ := lru.NewARC(utils.InmemorySnapshots)
-	validatorSignatures, _ := lru.NewARC(utils.InmemorySnapshots)
-	verifiedHeaders, _ := lru.NewARC(utils.InmemorySnapshots)
 	fakeEngine = &XDPoS_v1{
 		chainConfig: chainConfig,
 
 		config:              conf,
 		db:                  db,
-		recents:             recents,
-		signatures:          signatures,
-		verifiedHeaders:     verifiedHeaders,
-		validatorSignatures: validatorSignatures,
+		recents:             lru.NewCache[common.Hash, *SnapshotV1](utils.InMemorySnapshots),
+		signatures:          lru.NewCache[common.Hash, common.Address](utils.InMemorySnapshots),
+		verifiedHeaders:     lru.NewCache[common.Hash, struct{}](utils.InMemorySnapshots),
+		validatorSignatures: lru.NewCache[common.Hash, common.Address](utils.InMemorySnapshots),
 		proposals:           make(map[common.Address]bool),
 	}
 	return fakeEngine

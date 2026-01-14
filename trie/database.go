@@ -26,6 +26,7 @@ import (
 
 	"github.com/VictoriaMetrics/fastcache"
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"github.com/XinFinOrg/XDPoSChain/ethdb"
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/metrics"
@@ -56,15 +57,6 @@ var (
 	memcacheCommitSizeMeter  = metrics.NewRegisteredMeter("trie/memcache/commit/size", nil)
 )
 
-// secureKeyPrefix is the database key prefix used to store trie Node preimages.
-var secureKeyPrefix = []byte("secure-key-")
-
-// secureKeyPrefixLength is the length of the above prefix
-const secureKeyPrefixLength = 11
-
-// secureKeyLength is the length of the above prefix + 32byte hash.
-const secureKeyLength = secureKeyPrefixLength + 32
-
 // Database is an intermediate write layer between the trie data structures and
 // the disk database. The aim is to accumulate trie writes in-memory and only
 // periodically flush a couple tries to disk, garbage collecting the remainder.
@@ -77,7 +69,7 @@ type Database struct {
 	diskdb ethdb.KeyValueStore // Persistent storage for matured trie nodes
 
 	cleans  *fastcache.Cache            // GC friendly memory Cache of clean Node RLPs
-	dirties map[common.Hash]*cachedNode // Data and references relationships of dirty nodes
+	dirties map[common.Hash]*cachedNode // Data and references relationships of dirty trie nodes
 	oldest  common.Hash                 // Oldest tracked Node, flush-list head
 	newest  common.Hash                 // Newest tracked Node, flush-list tail
 
@@ -103,28 +95,26 @@ type Database struct {
 // in the same Cache fields).
 type rawNode []byte
 
-func (n rawNode) Cache() (HashNode, bool)   { panic("this should never end up in a live trie") }
+func (n rawNode) cache() (hashNode, bool)   { panic("this should never end up in a live trie") }
 func (n rawNode) fstring(ind string) string { panic("this should never end up in a live trie") }
+
+func (n rawNode) EncodeRLP(w io.Writer) error {
+	_, err := w.Write([]byte(n))
+	return err
+}
 
 // rawFullNode represents only the useful data content of a full Node, with the
 // caches and flags stripped out to minimize its data storage. This type honors
 // the same RLP encoding as the original parent.
-type rawFullNode [17]Node
+type rawFullNode [17]node
 
-func (n rawFullNode) Cache() (HashNode, bool)   { panic("this should never end up in a live trie") }
+func (n rawFullNode) cache() (hashNode, bool)   { panic("this should never end up in a live trie") }
 func (n rawFullNode) fstring(ind string) string { panic("this should never end up in a live trie") }
 
 func (n rawFullNode) EncodeRLP(w io.Writer) error {
-	var nodes [17]Node
-
-	for i, child := range n {
-		if child != nil {
-			nodes[i] = child
-		} else {
-			nodes[i] = nilValueNode
-		}
-	}
-	return rlp.Encode(w, nodes)
+	eb := rlp.NewEncoderBuffer(w)
+	n.encode(eb)
+	return eb.Flush()
 }
 
 // rawShortNode represents only the useful data content of a short Node, with the
@@ -132,16 +122,16 @@ func (n rawFullNode) EncodeRLP(w io.Writer) error {
 // the same RLP encoding as the original parent.
 type rawShortNode struct {
 	Key []byte
-	Val Node
+	Val node
 }
 
-func (n rawShortNode) Cache() (HashNode, bool)   { panic("this should never end up in a live trie") }
+func (n rawShortNode) cache() (hashNode, bool)   { panic("this should never end up in a live trie") }
 func (n rawShortNode) fstring(ind string) string { panic("this should never end up in a live trie") }
 
-// cachedNode is all the information we know about a single cached Node in the
-// memory database write layer.
+// cachedNode is all the information we know about a single cached trie node
+// in the memory database write layer.
 type cachedNode struct {
-	node Node   // Cached collapsed trie Node, or raw rlp data
+	node node   // Cached collapsed trie Node, or raw rlp data
 	size uint16 // Byte size of the useful cached data
 
 	parents  uint32                 // Number of live nodes referencing this one
@@ -160,31 +150,27 @@ var cachedNodeSize = int(reflect.TypeOf(cachedNode{}).Size())
 // reference map.
 const cachedNodeChildrenSize = 48
 
-// rlp returns the raw rlp encoded blob of the cached Node, either directly from
-// the Cache, or by regenerating it from the collapsed Node.
+// rlp returns the raw rlp encoded blob of the cached trie node, either directly
+// from the cache, or by regenerating it from the collapsed node.
 func (n *cachedNode) rlp() []byte {
 	if node, ok := n.node.(rawNode); ok {
 		return node
 	}
-	blob, err := rlp.EncodeToBytes(n.node)
-	if err != nil {
-		panic(err)
-	}
-	return blob
+	return nodeToBytes(n.node)
 }
 
 // obj returns the decoded and expanded trie Node, either directly from the Cache,
 // or by regenerating it from the rlp encoded blob.
-func (n *cachedNode) obj(hash common.Hash) Node {
+func (n *cachedNode) obj(hash common.Hash) node {
 	if node, ok := n.node.(rawNode); ok {
 		return MustDecodeNode(hash[:], node)
 	}
 	return expandNode(hash[:], n.node)
 }
 
-// forChilds invokes the callback for  all the tracked children of this Node,
-// both the implicit ones  from inside the Node as well as the explicit ones
-//from outside the Node.
+// forChilds invokes the callback for all the tracked children of this node,
+// both the implicit ones from inside the node as well as the explicit ones
+// from outside the node.
 func (n *cachedNode) forChilds(onChild func(hash common.Hash)) {
 	for child := range n.children {
 		onChild(child)
@@ -196,7 +182,7 @@ func (n *cachedNode) forChilds(onChild func(hash common.Hash)) {
 
 // forGatherChildren traverses the Node hierarchy of a collapsed storage Node and
 // invokes the callback for all the hashnode children.
-func forGatherChildren(n Node, onChild func(hash common.Hash)) {
+func forGatherChildren(n node, onChild func(hash common.Hash)) {
 	switch n := n.(type) {
 	case *rawShortNode:
 		forGatherChildren(n.Val, onChild)
@@ -204,9 +190,9 @@ func forGatherChildren(n Node, onChild func(hash common.Hash)) {
 		for i := 0; i < 16; i++ {
 			forGatherChildren(n[i], onChild)
 		}
-	case HashNode:
+	case hashNode:
 		onChild(common.BytesToHash(n))
-	case ValueNode, nil:
+	case valueNode, nil, rawNode:
 	default:
 		panic(fmt.Sprintf("unknown Node type: %T", n))
 	}
@@ -214,13 +200,13 @@ func forGatherChildren(n Node, onChild func(hash common.Hash)) {
 
 // simplifyNode traverses the hierarchy of an expanded memory Node and discards
 // all the internal caches, returning a Node that only contains the raw data.
-func simplifyNode(n Node) Node {
+func simplifyNode(n node) node {
 	switch n := n.(type) {
-	case *ShortNode:
+	case *shortNode:
 		// Short nodes discard the flags and cascade
 		return &rawShortNode{Key: n.Key, Val: simplifyNode(n.Val)}
 
-	case *FullNode:
+	case *fullNode:
 		// Full nodes discard the flags and cascade
 		node := rawFullNode(n.Children)
 		for i := 0; i < len(node); i++ {
@@ -230,7 +216,7 @@ func simplifyNode(n Node) Node {
 		}
 		return node
 
-	case ValueNode, HashNode, rawNode:
+	case valueNode, hashNode, rawNode:
 		return n
 
 	default:
@@ -240,11 +226,11 @@ func simplifyNode(n Node) Node {
 
 // expandNode traverses the Node hierarchy of a collapsed storage Node and converts
 // all fields and keys into expanded memory form.
-func expandNode(hash HashNode, n Node) Node {
+func expandNode(hash hashNode, n node) node {
 	switch n := n.(type) {
 	case *rawShortNode:
 		// Short nodes need key and child expansion
-		return &ShortNode{
+		return &shortNode{
 			Key: compactToHex(n.Key),
 			Val: expandNode(nil, n.Val),
 			flags: NodeFlag{
@@ -254,7 +240,7 @@ func expandNode(hash HashNode, n Node) Node {
 
 	case rawFullNode:
 		// Full nodes need child expansion
-		node := &FullNode{
+		node := &fullNode{
 			flags: NodeFlag{
 				hash: hash,
 			},
@@ -266,7 +252,7 @@ func expandNode(hash HashNode, n Node) Node {
 		}
 		return node
 
-	case ValueNode, HashNode:
+	case valueNode, hashNode:
 		return n
 
 	default:
@@ -300,26 +286,15 @@ func NewDatabaseWithCache(diskdb ethdb.KeyValueStore, cache int) *Database {
 }
 
 // DiskDB retrieves the persistent storage backing the trie database.
-func (db *Database) DiskDB() ethdb.KeyValueReader {
+func (db *Database) DiskDB() ethdb.KeyValueStore {
 	return db.diskdb
 }
 
-// InsertBlob writes a new reference tracked blob to the memory database if it's
-// yet unknown. This method should only be used for non-trie nodes that require
-// reference counting, since trie nodes are garbage collected directly through
-// their embedded children.
-func (db *Database) InsertBlob(hash common.Hash, blob []byte) {
-	db.Lock.Lock()
-	defer db.Lock.Unlock()
-
-	db.insert(hash, len(blob), rawNode(blob))
-}
-
-// insert inserts a collapsed trie Node into the memory database. This method is
-// a more generic version of InsertBlob, supporting both raw blob insertions as
-// well ex trie Node insertions. The blob size must be specified to allow proper
-// size tracking.
-func (db *Database) insert(hash common.Hash, size int, node Node) {
+// insert inserts a collapsed trie node into the memory database.
+// The blob size must be specified to allow proper size tracking.
+// All nodes inserted by this function will be reference tracked
+// and in theory should only used for **trie nodes** insertion.
+func (db *Database) insert(hash common.Hash, size int, node node) {
 	// If the Node's already cached, skip
 	if _, ok := db.dirties[hash]; ok {
 		return
@@ -362,7 +337,7 @@ func (db *Database) InsertPreimage(hash common.Hash, preimage []byte) {
 
 // Node retrieves a cached trie Node from memory, or returns nil if none can be
 // found in the memory Cache.
-func (db *Database) node(hash common.Hash) Node {
+func (db *Database) node(hash common.Hash) node {
 	// Retrieve the Node from the clean Cache if available
 	if db.cleans != nil {
 		if enc := db.cleans.Get(nil, hash[:]); enc != nil {
@@ -424,39 +399,30 @@ func (db *Database) Node(hash common.Hash) ([]byte, error) {
 	memcacheDirtyMissMeter.Mark(1)
 
 	// Content unavailable in memory, attempt to retrieve from disk
-	enc, err := db.diskdb.Get(hash[:])
-	if err == nil && enc != nil {
+	enc := rawdb.ReadTrieNode(db.diskdb, hash)
+	if len(enc) != 0 {
 		if db.cleans != nil {
 			db.cleans.Set(hash[:], enc)
 			memcacheCleanMissMeter.Mark(1)
 			memcacheCleanWriteMeter.Mark(int64(len(enc)))
 		}
+		return enc, nil
 	}
-	return enc, err
+	return nil, errors.New("not found")
 }
 
 // Preimage retrieves a cached trie Node pre-image from memory. If it cannot be
 // found cached, the method queries the persistent database for the content.
-func (db *Database) Preimage(hash common.Hash) ([]byte, error) {
+func (db *Database) Preimage(hash common.Hash) []byte {
 	// Retrieve the Node from Cache if available
 	db.Lock.RLock()
 	preimage := db.preimages[hash]
 	db.Lock.RUnlock()
 
 	if preimage != nil {
-		return preimage, nil
+		return preimage
 	}
-	// Content unavailable in memory, attempt to retrieve from disk
-	return db.diskdb.Get(secureKey(hash))
-}
-
-// secureKey returns the database key for the Preimage of key (as a newly
-// allocated byte-slice)
-func secureKey(hash common.Hash) []byte {
-	buf := make([]byte, secureKeyLength)
-	copy(buf, secureKeyPrefix)
-	copy(buf[secureKeyPrefixLength:], hash[:])
-	return buf
+	return rawdb.ReadPreimage(db.diskdb, hash)
 }
 
 // Nodes retrieves the hashes of all the nodes cached within the memory database.
@@ -475,7 +441,10 @@ func (db *Database) Nodes() []common.Hash {
 	return hashes
 }
 
-// Reference adds a new reference from a parent Node to a child Node.
+// Reference adds a new reference from a parent node to a child node.
+// This function is used to add reference between internal trie node
+// and external node(e.g. storage trie root), all internal trie nodes
+// are referenced together by database itself.
 func (db *Database) Reference(child common.Hash, parent common.Hash) {
 	db.Lock.Lock()
 	defer db.Lock.Unlock()
@@ -598,27 +567,16 @@ func (db *Database) Cap(limit common.StorageSize) error {
 	size := db.dirtiesSize + common.StorageSize((len(db.dirties)-1)*cachedNodeSize)
 	size += db.childrenSize - common.StorageSize(len(db.dirties[common.Hash{}].children)*(common.HashLength+2))
 
-	// We reuse an ephemeral buffer for the keys. The batch Put operation
-	// copies it internally, so we can reuse it.
-	var keyBuf [secureKeyLength]byte
-	copy(keyBuf[:], secureKeyPrefix)
-
 	// If the Preimage Cache got large enough, push to disk. If it's still small
 	// leave for later to deduplicate writes.
 	flushPreimages := db.preimagesSize > 4*1024*1024
 	if flushPreimages {
-		for hash, preimage := range db.preimages {
-			copy(keyBuf[secureKeyPrefixLength:], hash[:])
-			if err := batch.Put(keyBuf[:], preimage); err != nil {
-				log.Error("Failed to commit Preimage from trie database", "err", err)
+		rawdb.WritePreimages(batch, db.preimages)
+		if batch.ValueSize() > ethdb.IdealBatchSize {
+			if err := batch.Write(); err != nil {
 				return err
 			}
-			if batch.ValueSize() > ethdb.IdealBatchSize {
-				if err := batch.Write(); err != nil {
-					return err
-				}
-				batch.Reset()
-			}
+			batch.Reset()
 		}
 	}
 	// Keep committing nodes from the flush-list until we're below allowance
@@ -626,9 +584,8 @@ func (db *Database) Cap(limit common.StorageSize) error {
 	for size > limit && oldest != (common.Hash{}) {
 		// Fetch the oldest referenced Node and push into the batch
 		node := db.dirties[oldest]
-		if err := batch.Put(oldest[:], node.rlp()); err != nil {
-			return err
-		}
+		rawdb.WriteTrieNode(batch, oldest, node.rlp())
+
 		// If we exceeded the ideal batch size, commit and reset
 		if batch.ValueSize() >= ethdb.IdealBatchSize {
 			if err := batch.Write(); err != nil {
@@ -656,8 +613,7 @@ func (db *Database) Cap(limit common.StorageSize) error {
 	defer db.Lock.Unlock()
 
 	if flushPreimages {
-		db.preimages = make(map[common.Hash][]byte)
-		db.preimagesSize = 0
+		db.preimages, db.preimagesSize = make(map[common.Hash][]byte), 0
 	}
 	for db.oldest != oldest {
 		node := db.dirties[db.oldest]
@@ -700,25 +656,13 @@ func (db *Database) Commit(node common.Hash, report bool) error {
 	start := time.Now()
 	batch := db.diskdb.NewBatch()
 
-	// We reuse an ephemeral buffer for the keys. The batch Put operation
-	// copies it internally, so we can reuse it.
-	var keyBuf [secureKeyLength]byte
-	copy(keyBuf[:], secureKeyPrefix)
-
 	// Move all of the accumulated preimages into a write batch
-	for hash, preimage := range db.preimages {
-		copy(keyBuf[secureKeyPrefixLength:], hash[:])
-		if err := batch.Put(keyBuf[:], preimage); err != nil {
-			log.Error("Failed to commit Preimage from trie database", "err", err)
+	rawdb.WritePreimages(batch, db.preimages)
+	if batch.ValueSize() > ethdb.IdealBatchSize {
+		if err := batch.Write(); err != nil {
 			return err
 		}
-		// If the batch is too large, flush to disk
-		if batch.ValueSize() > ethdb.IdealBatchSize {
-			if err := batch.Write(); err != nil {
-				return err
-			}
-			batch.Reset()
-		}
+		batch.Reset()
 	}
 	// Since we're going to replay trie Node writes into the clean Cache, flush out
 	// any batched pre-images before continuing.
@@ -748,8 +692,7 @@ func (db *Database) Commit(node common.Hash, report bool) error {
 	batch.Reset()
 
 	// Reset the storage counters and bumpd metrics
-	db.preimages = make(map[common.Hash][]byte)
-	db.preimagesSize = 0
+	db.preimages, db.preimagesSize = make(map[common.Hash][]byte), 0
 
 	memcacheCommitTimeTimer.Update(time.Since(start))
 	memcacheCommitSizeMeter.Mark(int64(storage - db.dirtiesSize))
@@ -785,10 +728,8 @@ func (db *Database) commit(hash common.Hash, batch ethdb.Batch, uncacher *cleane
 	if err != nil {
 		return err
 	}
-	if err := batch.Put(hash[:], node.rlp()); err != nil {
-		return err
-	}
 	// If we've reached an optimal batch size, commit and start over
+	rawdb.WriteTrieNode(batch, hash, node.rlp())
 	if batch.ValueSize() >= ethdb.IdealBatchSize {
 		if err := batch.Write(); err != nil {
 			return err

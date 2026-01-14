@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -28,31 +29,29 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/console"
 	"github.com/XinFinOrg/XDPoSChain/node"
 	"github.com/XinFinOrg/XDPoSChain/rpc"
-	"gopkg.in/urfave/cli.v1"
+	"github.com/urfave/cli/v2"
 )
 
 var (
 	consoleFlags = []cli.Flag{utils.JSpathFlag, utils.ExecFlag, utils.PreloadJSFlag}
 
-	consoleCommand = cli.Command{
-		Action:   utils.MigrateFlags(localConsole),
-		Name:     "console",
-		Usage:    "Start an interactive JavaScript environment",
-		Flags:    append(append(append(nodeFlags, rpcFlags...), consoleFlags...), whisperFlags...),
-		Category: "CONSOLE COMMANDS",
+	consoleCommand = &cli.Command{
+		Action: localConsole,
+		Name:   "console",
+		Usage:  "Start an interactive JavaScript environment",
+		Flags:  slices.Concat(nodeFlags, rpcFlags, consoleFlags),
 		Description: `
 The XDC console is an interactive shell for the JavaScript runtime environment
 which exposes a node admin interface as well as the Ðapp JavaScript API.
 See https://github.com/XinFinOrg/XDPoSChain/wiki/JavaScript-Console.`,
 	}
 
-	attachCommand = cli.Command{
-		Action:    utils.MigrateFlags(remoteConsole),
+	attachCommand = &cli.Command{
+		Action:    remoteConsole,
 		Name:      "attach",
 		Usage:     "Start an interactive JavaScript environment (connect to node)",
 		ArgsUsage: "[endpoint]",
-		Flags:     append(consoleFlags, utils.DataDirFlag),
-		Category:  "CONSOLE COMMANDS",
+		Flags:     slices.Concat([]cli.Flag{utils.DataDirFlag}, consoleFlags),
 		Description: `
 The XDC console is an interactive shell for the JavaScript runtime environment
 which exposes a node admin interface as well as the Ðapp JavaScript API.
@@ -60,13 +59,12 @@ See https://github.com/XinFinOrg/XDPoSChain/wiki/JavaScript-Console.
 This command allows to open a console on a running XDC node.`,
 	}
 
-	javascriptCommand = cli.Command{
-		Action:    utils.MigrateFlags(ephemeralConsole),
+	javascriptCommand = &cli.Command{
+		Action:    ephemeralConsole,
 		Name:      "js",
 		Usage:     "Execute the specified JavaScript files",
 		ArgsUsage: "<jsfile> [jsfile...]",
-		Flags:     append(nodeFlags, consoleFlags...),
-		Category:  "CONSOLE COMMANDS",
+		Flags:     slices.Concat(nodeFlags, consoleFlags),
 		Description: `
 The JavaScript VM exposes a node admin interface as well as the Ðapp
 JavaScript API. See https://github.com/XinFinOrg/XDPoSChain/wiki/JavaScript-Console`,
@@ -77,18 +75,18 @@ JavaScript API. See https://github.com/XinFinOrg/XDPoSChain/wiki/JavaScript-Cons
 // same time.
 func localConsole(ctx *cli.Context) error {
 	// Create and start the node based on the CLI flags
-	node, cfg := makeFullNode(ctx)
-	startNode(ctx, node, cfg)
-	defer node.Stop()
+	stack, backend, cfg := makeFullNode(ctx)
+	startNode(ctx, stack, backend, cfg)
+	defer stack.Close()
 
 	// Attach to the newly started node and start the JavaScript console
-	client, err := node.Attach()
+	client, err := stack.Attach()
 	if err != nil {
 		utils.Fatalf("Failed to attach to the inproc XDC: %v", err)
 	}
 	config := console.Config{
 		DataDir: utils.MakeDataDir(ctx),
-		DocRoot: ctx.GlobalString(utils.JSpathFlag.Name),
+		DocRoot: ctx.String(utils.JSpathFlag.Name),
 		Client:  client,
 		Preload: utils.MakeConsolePreloads(ctx),
 	}
@@ -100,7 +98,7 @@ func localConsole(ctx *cli.Context) error {
 	defer console.Stop(false)
 
 	// If only a short execution was requested, evaluate and return
-	if script := ctx.GlobalString(utils.ExecFlag.Name); script != "" {
+	if script := ctx.String(utils.ExecFlag.Name); script != "" {
 		console.Evaluate(script)
 		return nil
 	}
@@ -114,18 +112,21 @@ func localConsole(ctx *cli.Context) error {
 // remoteConsole will connect to a remote XDC instance, attaching a JavaScript
 // console to it.
 func remoteConsole(ctx *cli.Context) error {
-	// Attach to a remotely running XDC instance and start the JavaScript console
+	if ctx.Args().Len() > 1 {
+		utils.Fatalf("invalid command-line: too many arguments")
+	}
+
 	endpoint := ctx.Args().First()
 	if endpoint == "" {
 		path := node.DefaultDataDir()
-		if ctx.GlobalIsSet(utils.DataDirFlag.Name) {
-			path = ctx.GlobalString(utils.DataDirFlag.Name)
+		if ctx.IsSet(utils.DataDirFlag.Name) {
+			path = ctx.String(utils.DataDirFlag.Name)
 		}
 		if path != "" {
-			if ctx.GlobalBool(utils.TestnetFlag.Name) {
+			if ctx.Bool(utils.TestnetFlag.Name) {
 				path = filepath.Join(path, "testnet")
-			} else if ctx.GlobalBool(utils.RinkebyFlag.Name) {
-				path = filepath.Join(path, "rinkeby")
+			} else if ctx.Bool(utils.DevnetFlag.Name) {
+				path = filepath.Join(path, "devnet")
 			}
 		}
 		endpoint = fmt.Sprintf("%s/XDC.ipc", path)
@@ -137,7 +138,7 @@ func remoteConsole(ctx *cli.Context) error {
 	}
 	config := console.Config{
 		DataDir: utils.MakeDataDir(ctx),
-		DocRoot: ctx.GlobalString(utils.JSpathFlag.Name),
+		DocRoot: ctx.String(utils.JSpathFlag.Name),
 		Client:  client,
 		Preload: utils.MakeConsolePreloads(ctx),
 	}
@@ -148,7 +149,7 @@ func remoteConsole(ctx *cli.Context) error {
 	}
 	defer console.Stop(false)
 
-	if script := ctx.GlobalString(utils.ExecFlag.Name); script != "" {
+	if script := ctx.String(utils.ExecFlag.Name); script != "" {
 		console.Evaluate(script)
 		return nil
 	}
@@ -179,18 +180,18 @@ func dialRPC(endpoint string) (*rpc.Client, error) {
 // everything down.
 func ephemeralConsole(ctx *cli.Context) error {
 	// Create and start the node based on the CLI flags
-	node, cfg := makeFullNode(ctx)
-	startNode(ctx, node, cfg)
-	defer node.Stop()
+	stack, backend, cfg := makeFullNode(ctx)
+	startNode(ctx, stack, backend, cfg)
+	defer stack.Close()
 
 	// Attach to the newly started node and start the JavaScript console
-	client, err := node.Attach()
+	client, err := stack.Attach()
 	if err != nil {
 		utils.Fatalf("Failed to attach to the inproc XDC: %v", err)
 	}
 	config := console.Config{
 		DataDir: utils.MakeDataDir(ctx),
-		DocRoot: ctx.GlobalString(utils.JSpathFlag.Name),
+		DocRoot: ctx.String(utils.JSpathFlag.Name),
 		Client:  client,
 		Preload: utils.MakeConsolePreloads(ctx),
 	}
@@ -202,7 +203,7 @@ func ephemeralConsole(ctx *cli.Context) error {
 	defer console.Stop(false)
 
 	// Evaluate each of the specified JavaScript files
-	for _, file := range ctx.Args() {
+	for _, file := range ctx.Args().Slice() {
 		if err = console.Execute(file); err != nil {
 			utils.Fatalf("Failed to execute %s: %v", file, err)
 		}

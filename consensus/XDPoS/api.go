@@ -18,6 +18,7 @@ package XDPoS
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/XinFinOrg/XDPoSChain/common"
@@ -84,6 +85,8 @@ func (api *API) GetSnapshot(number *rpc.BlockNumber) (*utils.PublicApiSnapshot, 
 	var header *types.Header
 	if number == nil || *number == rpc.LatestBlockNumber {
 		header = api.chain.CurrentHeader()
+	} else if number.Int64() < 0 {
+		return nil, fmt.Errorf("invalid block number %d", number.Int64())
 	} else {
 		header = api.chain.GetHeaderByNumber(uint64(number.Int64()))
 	}
@@ -109,6 +112,8 @@ func (api *API) GetSigners(number *rpc.BlockNumber) ([]common.Address, error) {
 	var header *types.Header
 	if number == nil || *number == rpc.LatestBlockNumber {
 		header = api.chain.CurrentHeader()
+	} else if number.Int64() < 0 {
+		return nil, fmt.Errorf("invalid block number %d", number.Int64())
 	} else {
 		header = api.chain.GetHeaderByNumber(uint64(number.Int64()))
 	}
@@ -134,10 +139,26 @@ func (api *API) GetMasternodesByNumber(number *rpc.BlockNumber) MasternodesStatu
 	if number == nil || *number == rpc.LatestBlockNumber {
 		header = api.chain.CurrentHeader()
 	} else if *number == rpc.CommittedBlockNumber {
-		hash := api.XDPoS.EngineV2.GetLatestCommittedBlockInfo().Hash
-		header = api.chain.GetHeaderByHash(hash)
+		if info := api.XDPoS.EngineV2.GetLatestCommittedBlockInfo(); info != nil {
+			header = api.chain.GetHeaderByHash(info.Hash)
+		}
+	} else if number.Int64() < 0 {
+		return MasternodesStatus{
+			Error: fmt.Errorf("invalid block number %d", number.Int64()),
+		}
 	} else {
 		header = api.chain.GetHeaderByNumber(uint64(number.Int64()))
+	}
+
+	if header == nil {
+		if number == nil {
+			return MasternodesStatus{
+				Error: errors.New("can not get header by nil number"),
+			}
+		}
+		return MasternodesStatus{
+			Error: fmt.Errorf("can not get header by number %d", number.Int64()),
+		}
 	}
 
 	round, err := api.XDPoS.EngineV2.GetRoundNumber(header)
@@ -225,16 +246,26 @@ func (api *API) GetV2BlockByHeader(header *types.Header, uncle bool) *V2BlockInf
 }
 
 func (api *API) GetV2BlockByNumber(number *rpc.BlockNumber) *V2BlockInfo {
-	header := api.getHeaderFromApiBlockNum(number)
-	if header == nil {
+	header, err := api.getHeaderFromApiBlockNum(number)
+	if err != nil {
 		return &V2BlockInfo{
-			Number: big.NewInt(number.Int64()),
-			Error:  "can not find block from this number",
+			Error: err.Error(),
+		}
+	}
+	if header == nil {
+		if number == nil {
+			return &V2BlockInfo{
+				Error: "can not find block from nil number",
+			}
+		} else {
+			return &V2BlockInfo{
+				Number: big.NewInt(number.Int64()),
+				Error:  "can not find block from this number",
+			}
 		}
 	}
 
-	uncle := false
-	return api.GetV2BlockByHeader(header, uncle)
+	return api.GetV2BlockByHeader(header, false)
 }
 
 // Confirm V2 Block Committed Status
@@ -249,11 +280,14 @@ func (api *API) GetV2BlockByHash(blockHash common.Hash) *V2BlockInfo {
 
 	// confirm this is on the main chain
 	chainHeader := api.chain.GetHeaderByNumber(header.Number.Uint64())
-	uncle := false
-	if header.Hash() != chainHeader.Hash() {
-		uncle = true
+	if chainHeader == nil {
+		return &V2BlockInfo{
+			Number: header.Number,
+			Error:  "can not find chain header from this number",
+		}
 	}
 
+	uncle := header.Hash() != chainHeader.Hash()
 	return api.GetV2BlockByHeader(header, uncle)
 }
 
@@ -261,17 +295,10 @@ func (api *API) NetworkInformation() NetworkInformation {
 	info := NetworkInformation{}
 	info.NetworkId = api.chain.Config().ChainId
 	info.XDCValidatorAddress = common.MasternodeVotingSMCBinary
-	if common.IsTestnet {
-		info.LendingAddress = common.HexToAddress(common.LendingRegistrationSMCTestnet)
-		info.RelayerRegistrationAddress = common.HexToAddress(common.RelayerRegistrationSMCTestnet)
-		info.XDCXListingAddress = common.XDCXListingSMCTestNet
-		info.XDCZAddress = common.TRC21IssuerSMCTestNet
-	} else {
-		info.LendingAddress = common.HexToAddress(common.LendingRegistrationSMC)
-		info.RelayerRegistrationAddress = common.HexToAddress(common.RelayerRegistrationSMC)
-		info.XDCXListingAddress = common.XDCXListingSMC
-		info.XDCZAddress = common.TRC21IssuerSMC
-	}
+	info.LendingAddress = common.LendingRegistrationSMC
+	info.RelayerRegistrationAddress = common.RelayerRegistrationSMC
+	info.XDCXListingAddress = common.XDCXListingSMC
+	info.XDCZAddress = common.TRC21IssuerSMC
 	info.ConsensusConfigs = *api.XDPoS.config
 
 	return info
@@ -281,20 +308,33 @@ func (api *API) NetworkInformation() NetworkInformation {
 An API exclusively for V2 consensus, designed to assist in troubleshooting miners by identifying who mined during their allocated term.
 */
 func (api *API) GetMissedRoundsInEpochByBlockNum(number *rpc.BlockNumber) (*utils.PublicApiMissedRoundsMetadata, error) {
-	return api.XDPoS.CalculateMissingRounds(api.chain, api.getHeaderFromApiBlockNum(number))
+	header, err := api.getHeaderFromApiBlockNum(number)
+	if err != nil {
+		return nil, err
+	}
+	if header == nil {
+		if number == nil {
+			return nil, errors.New("can not get header by nil number")
+		}
+		return nil, fmt.Errorf("can not get header by number %d", number.Int64())
+	}
+	return api.XDPoS.CalculateMissingRounds(api.chain, header)
 }
 
-func (api *API) getHeaderFromApiBlockNum(number *rpc.BlockNumber) *types.Header {
+func (api *API) getHeaderFromApiBlockNum(number *rpc.BlockNumber) (*types.Header, error) {
 	var header *types.Header
 	if number == nil || *number == rpc.LatestBlockNumber {
 		header = api.chain.CurrentHeader()
 	} else if *number == rpc.CommittedBlockNumber {
-		hash := api.XDPoS.EngineV2.GetLatestCommittedBlockInfo().Hash
-		header = api.chain.GetHeaderByHash(hash)
+		if info := api.XDPoS.EngineV2.GetLatestCommittedBlockInfo(); info != nil {
+			header = api.chain.GetHeaderByHash(info.Hash)
+		}
+	} else if number.Int64() < 0 {
+		return nil, fmt.Errorf("invalid block number %d", number.Int64())
 	} else {
 		header = api.chain.GetHeaderByNumber(uint64(number.Int64()))
 	}
-	return header
+	return header, nil
 }
 
 func calculateSigners(message map[string]SignerTypes, pool map[string]map[common.Hash]utils.PoolObj, masternodes []common.Address) {
@@ -323,16 +363,39 @@ func calculateSigners(message map[string]SignerTypes, pool map[string]map[common
 }
 
 func (api *API) GetEpochNumbersBetween(begin, end *rpc.BlockNumber) ([]uint64, error) {
-	beginHeader := api.getHeaderFromApiBlockNum(begin)
+	beginHeader, err := api.getHeaderFromApiBlockNum(begin)
+	if err != nil {
+		if begin == nil {
+			return nil, fmt.Errorf("can not get begin header from nil number, err: %w", err)
+		}
+		return nil, fmt.Errorf("can not get begin header from number %d, err: %w", begin.Int64(), err)
+	}
 	if beginHeader == nil {
-		return nil, errors.New("illegal begin block number")
+		if begin == nil {
+			return nil, errors.New("begin block is nil")
+		}
+		return nil, fmt.Errorf("illegal begin block number %d", begin.Int64())
 	}
-	endHeader := api.getHeaderFromApiBlockNum(end)
+	endHeader, err := api.getHeaderFromApiBlockNum(end)
+	if err != nil {
+		if end == nil {
+			return nil, fmt.Errorf("can not get end header from nil number, err: %w", err)
+		}
+		return nil, fmt.Errorf("can not get end header from number %d, err: %w", end.Int64(), err)
+	}
 	if endHeader == nil {
-		return nil, errors.New("illegal end block number")
+		if end == nil {
+			return nil, errors.New("end block number is nil")
+		}
+		return nil, fmt.Errorf("illegal end block number %d", end.Int64())
 	}
-	if beginHeader.Number.Cmp(endHeader.Number) > 0 {
+
+	diff := new(big.Int).Sub(endHeader.Number, beginHeader.Number).Int64()
+	if diff < 0 {
 		return nil, errors.New("illegal begin and end block number, begin > end")
+	}
+	if diff > 50_000 {
+		return nil, errors.New("block range over limit of 50,000 blocks")
 	}
 	epochSwitchInfos, err := api.XDPoS.GetEpochSwitchInfoBetween(api.chain, beginHeader, endHeader)
 	if err != nil {

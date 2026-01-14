@@ -2,6 +2,7 @@ package engine_v2
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
@@ -17,6 +18,7 @@ type SnapshotV2 struct {
 	Hash   common.Hash `json:"hash"`   // Block hash where the snapshot was created
 
 	// candidates will get assigned on updateM1
+	// NOTE: must keep JSON tag "masterNodes", ref: PR #517
 	NextEpochCandidates []common.Address `json:"masterNodes"` // Set of authorized candidates nodes at this moment for next epoch
 }
 
@@ -77,15 +79,24 @@ func (x *XDPoS_v2) getSnapshot(chain consensus.ChainReader, number uint64, isGap
 	if isGapNumber {
 		gapBlockNum = number
 	} else {
-		gapBlockNum = number - number%x.config.Epoch - x.config.Gap
+		gapBlockNum = number - number%x.config.Epoch
+		if gapBlockNum > x.config.Gap {
+			gapBlockNum -= x.config.Gap
+		} else {
+			gapBlockNum = 0
+		}
 	}
 
-	gapBlockHash := chain.GetHeaderByNumber(gapBlockNum).Hash()
+	gapHeader := chain.GetHeaderByNumber(gapBlockNum)
+	if gapHeader == nil {
+		log.Error("[getSnapshot] Fail to get header", "number", gapBlockNum)
+		return nil, fmt.Errorf("getSnapshot fail to get header by number: %v", gapBlockNum)
+	}
+	gapBlockHash := gapHeader.Hash()
 	log.Debug("get snapshot from gap block", "number", gapBlockNum, "hash", gapBlockHash.Hex())
 
 	// If an in-memory SnapshotV2 was found, use that
-	if s, ok := x.snapshots.Get(gapBlockHash); ok {
-		snap := s.(*SnapshotV2)
+	if snap, ok := x.snapshots.Get(gapBlockHash); ok && snap != nil {
 		log.Trace("Loaded snapshot from memory", "number", gapBlockNum, "hash", gapBlockHash)
 		return snap, nil
 	}

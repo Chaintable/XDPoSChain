@@ -22,7 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/XinFinOrg/XDPoSChain/log"
-	mapset "github.com/deckarep/golang-set"
+	mapset "github.com/deckarep/golang-set/v2"
 )
 
 const MetadataApi = "rpc"
@@ -45,12 +45,12 @@ type Server struct {
 	services serviceRegistry
 	idgen    func() ID
 	run      int32
-	codecs   mapset.Set
+	codecs   mapset.Set[*ServerCodec]
 }
 
 // NewServer creates a new server instance with no registered handlers.
 func NewServer() *Server {
-	server := &Server{idgen: randomIDGenerator(), codecs: mapset.NewSet(), run: 1}
+	server := &Server{idgen: randomIDGenerator(), codecs: mapset.NewSet[*ServerCodec](), run: 1}
 	// Register the default service providing meta information about the RPC service such
 	// as the services and methods it offers.
 	rpcService := &RPCService{server}
@@ -80,8 +80,8 @@ func (s *Server) ServeCodec(codec ServerCodec, options CodecOption) {
 	}
 
 	// Add the codec to the set so it can be closed by Stop.
-	s.codecs.Add(codec)
-	defer s.codecs.Remove(codec)
+	s.codecs.Add(&codec)
+	defer s.codecs.Remove(&codec)
 
 	c := initClient(codec, s.idgen, &s.services)
 	<-codec.closed()
@@ -121,8 +121,8 @@ func (s *Server) serveSingleRequest(ctx context.Context, codec ServerCodec) {
 func (s *Server) Stop() {
 	if atomic.CompareAndSwapInt32(&s.run, 1, 0) {
 		log.Debug("RPC server shutting down")
-		s.codecs.Each(func(c interface{}) bool {
-			c.(ServerCodec).close()
+		s.codecs.Each(func(c *ServerCodec) bool {
+			(*c).close()
 			return true
 		})
 	}
@@ -144,4 +144,39 @@ func (s *RPCService) Modules() map[string]string {
 		modules[name] = "1.0"
 	}
 	return modules
+}
+
+// PeerInfo contains information about the remote end of the network connection.
+//
+// This is available within RPC method handlers through the context. Call
+// PeerInfoFromContext to get information about the client connection related to
+// the current method call.
+type PeerInfo struct {
+	// Transport is name of the protocol used by the client.
+	// This can be "http", "ws" or "ipc".
+	Transport string
+
+	// Address of client. This will usually contain the IP address and port.
+	RemoteAddr string
+
+	// Addditional information for HTTP and WebSocket connections.
+	HTTP struct {
+		// Protocol version, i.e. "HTTP/1.1". This is not set for WebSocket.
+		Version string
+		// Header values sent by the client.
+		UserAgent string
+		Origin    string
+		Host      string
+	}
+}
+
+type peerInfoContextKey struct{}
+
+// PeerInfoFromContext returns information about the client's network connection.
+// Use this with the context passed to RPC method handler functions.
+//
+// The zero value is returned if no connection info is present in ctx.
+func PeerInfoFromContext(ctx context.Context) PeerInfo {
+	info, _ := ctx.Value(peerInfoContextKey{}).(PeerInfo)
+	return info
 }

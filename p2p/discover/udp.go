@@ -228,6 +228,9 @@ type Config struct {
 	NetRestrict  *netutil.Netlist  // network whitelist
 	Bootnodes    []*Node           // list of bootstrap nodes
 	Unhandled    chan<- ReadPacket // unhandled packets are sent on this channel
+
+	// The options below are useful in very specific cases, like in unit tests.
+	Log log.Logger // if set, log messages go here
 }
 
 // ListenUDP returns a new table that listens for UDP packets on laddr.
@@ -255,7 +258,7 @@ func newUDP(c conn, cfg Config) (*Table, *udp, error) {
 	}
 	// TODO: separate TCP port
 	udp.ourEndpoint = makeEndpoint(realaddr, uint16(realaddr.Port))
-	tab, err := newTable(udp, PubkeyID(&cfg.PrivateKey.PublicKey), realaddr, cfg.NodeDBPath, cfg.Bootnodes)
+	tab, err := newMeteredTable(udp, PubkeyID(&cfg.PrivateKey.PublicKey), realaddr, cfg.NodeDBPath, cfg.Bootnodes)
 	if err != nil {
 		return nil, nil, err
 	}

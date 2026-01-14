@@ -15,22 +15,22 @@ import (
 func TestGetMissedRoundsInEpochByBlockNumOnlyForV2Consensus(t *testing.T) {
 	_, bc, _, _, _ := PrepareXDCTestBlockChainWith128Candidates(t, 1802, params.TestXDPoSMockChainConfig)
 
-	engine := bc.GetBlockChain().Engine().(*XDPoS.XDPoS)
+	engine := bc.BlockChain().Engine().(*XDPoS.XDPoS)
 	blockNum := rpc.BlockNumber(123)
 
-	data, err := engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err := engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
-	assert.EqualError(t, err, "Not supported in the v1 consensus")
+	assert.EqualError(t, err, "not supported in the v1 consensus")
 	assert.Nil(t, data)
 }
 
 func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2(t *testing.T) {
 	_, bc, cb, _, _ := PrepareXDCTestBlockChainWith128Candidates(t, 1802, params.TestXDPoSMockChainConfig)
 
-	engine := bc.GetBlockChain().Engine().(*XDPoS.XDPoS)
+	engine := bc.BlockChain().Engine().(*XDPoS.XDPoS)
 	blockNum := rpc.BlockNumber(cb.NumberU64())
 
-	data, err := engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err := engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
 	assert.Nil(t, err)
 	assert.Equal(t, types.Round(900), data.EpochRound)
@@ -39,7 +39,7 @@ func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2(t *testing.T) {
 
 	blockNum = rpc.BlockNumber(1800)
 
-	data, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
 	assert.Nil(t, err)
 	assert.Equal(t, types.Round(900), data.EpochRound)
@@ -48,7 +48,7 @@ func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2(t *testing.T) {
 
 	blockNum = rpc.BlockNumber(1801)
 
-	data, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
 	assert.Nil(t, err)
 	assert.Equal(t, types.Round(900), data.EpochRound)
@@ -59,10 +59,10 @@ func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2(t *testing.T) {
 func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2FistEpoch(t *testing.T) {
 	_, bc, _, _, _ := PrepareXDCTestBlockChainWith128Candidates(t, 1802, params.TestXDPoSMockChainConfig)
 
-	engine := bc.GetBlockChain().Engine().(*XDPoS.XDPoS)
+	engine := bc.BlockChain().Engine().(*XDPoS.XDPoS)
 	blockNum := rpc.BlockNumber(901)
 
-	data, err := engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err := engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
 	assert.Nil(t, err)
 	assert.Equal(t, types.Round(1), data.EpochRound)
@@ -73,7 +73,7 @@ func TestGetMissedRoundsInEpochByBlockNumReturnEmptyForV2FistEpoch(t *testing.T)
 func TestGetMissedRoundsInEpochByBlockNum(t *testing.T) {
 	blockchain, bc, currentBlock, signer, signFn := PrepareXDCTestBlockChainWith128Candidates(t, 1802, params.TestXDPoSMockChainConfig)
 	chainConfig := params.TestXDPoSMockChainConfig
-	engine := bc.GetBlockChain().Engine().(*XDPoS.XDPoS)
+	engine := bc.BlockChain().Engine().(*XDPoS.XDPoS)
 	blockCoinBase := signer.Hex()
 
 	startingBlockNum := currentBlock.Number().Int64() + 1
@@ -86,14 +86,14 @@ func TestGetMissedRoundsInEpochByBlockNum(t *testing.T) {
 	}
 
 	// Update Signer as there is no previous signer assigned
-	err = UpdateSigner(blockchain)
+	blockchain.UpdateM1()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	blockNum := rpc.BlockNumber(1803)
 
-	data, err := engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
+	data, err := engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetMissedRoundsInEpochByBlockNum(&blockNum)
 
 	assert.Nil(t, err)
 	assert.Equal(t, types.Round(900), data.EpochRound)
@@ -114,32 +114,32 @@ func TestGetMissedRoundsInEpochByBlockNum(t *testing.T) {
 func TestGetEpochNumbersBetween(t *testing.T) {
 	_, bc, _, _, _ := PrepareXDCTestBlockChainWith128Candidates(t, 1802, params.TestXDPoSMockChainConfig)
 
-	engine := bc.GetBlockChain().Engine().(*XDPoS.XDPoS)
+	engine := bc.BlockChain().Engine().(*XDPoS.XDPoS)
 
 	begin := rpc.BlockNumber(1800)
 	end := rpc.BlockNumber(1802)
-	numbers, err := engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err := engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.True(t, reflect.DeepEqual([]uint64{1800}, numbers))
 	assert.Nil(t, err)
 
 	begin = rpc.BlockNumber(1799)
 	end = rpc.BlockNumber(1802)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.True(t, reflect.DeepEqual([]uint64{1800}, numbers))
 	assert.Nil(t, err)
 
 	begin = rpc.BlockNumber(1799)
 	end = rpc.BlockNumber(1802)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.True(t, reflect.DeepEqual([]uint64{1800}, numbers))
 	assert.Nil(t, err)
 
 	begin = rpc.BlockNumber(901)
 	end = rpc.BlockNumber(1802)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.True(t, reflect.DeepEqual([]uint64{901, 1800}, numbers))
 	assert.Nil(t, err)
@@ -147,7 +147,7 @@ func TestGetEpochNumbersBetween(t *testing.T) {
 	// 900 is V1, not V2, so error
 	begin = rpc.BlockNumber(900)
 	end = rpc.BlockNumber(1802)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.Nil(t, numbers)
 	assert.EqualError(t, err, "not supported in the v1 consensus")
@@ -155,18 +155,18 @@ func TestGetEpochNumbersBetween(t *testing.T) {
 	// 1803 not exist
 	begin = rpc.BlockNumber(901)
 	end = rpc.BlockNumber(1803)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.Nil(t, numbers)
-	assert.EqualError(t, err, "illegal end block number")
+	assert.EqualError(t, err, "illegal end block number 1803")
 
 	// 1803 not exist
 	begin = rpc.BlockNumber(1803)
 	end = rpc.BlockNumber(1803)
-	numbers, err = engine.APIs(bc.GetBlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
+	numbers, err = engine.APIs(bc.BlockChain())[0].Service.(*XDPoS.API).GetEpochNumbersBetween(&begin, &end)
 
 	assert.Nil(t, numbers)
-	assert.EqualError(t, err, "illegal begin block number")
+	assert.EqualError(t, err, "illegal begin block number 1803")
 }
 func TestGetBlockByEpochNumber(t *testing.T) {
 	blockchain, _, currentBlock, signer, signFn := PrepareXDCTestBlockChainWithPenaltyForV2Engine(t, 1802, params.TestXDPoSMockChainConfig)
@@ -204,20 +204,14 @@ func TestGetBlockByEpochNumber(t *testing.T) {
 	assert.Nil(t, info)
 
 	info, err = engine.APIs(blockchain)[0].Service.(*XDPoS.API).GetBlockInfoByEpochNum(1)
-	assert.Equal(t, info.EpochFirstBlockNumber.Int64(), int64(901))
-	assert.Equal(t, info.EpochLastBlockNumber.Int64(), int64(1799))
 	assert.Equal(t, info.EpochRound, types.Round(1))
 	assert.Nil(t, err)
 
 	info, err = engine.APIs(blockchain)[0].Service.(*XDPoS.API).GetBlockInfoByEpochNum(2)
-	assert.Equal(t, info.EpochFirstBlockNumber.Int64(), int64(1800))
-	assert.Equal(t, info.EpochLastBlockNumber.Int64(), int64(1802))
 	assert.Equal(t, info.EpochRound, types.Round(900))
 	assert.Nil(t, err)
 
 	info, err = engine.APIs(blockchain)[0].Service.(*XDPoS.API).GetBlockInfoByEpochNum(3)
-	assert.Equal(t, info.EpochFirstBlockNumber.Int64(), int64(1803))
-	assert.Nil(t, info.EpochLastBlockNumber)
 	assert.Equal(t, info.EpochRound, types.Round(largeRound))
 	assert.Nil(t, err)
 
@@ -227,8 +221,6 @@ func TestGetBlockByEpochNumber(t *testing.T) {
 
 	info, err = engine.APIs(blockchain)[0].Service.(*XDPoS.API).GetBlockInfoByEpochNum(5)
 	assert.Equal(t, info.EpochRound, types.Round(largeRound2))
-	assert.Equal(t, info.EpochFirstBlockNumber.Int64(), int64(1804))
-	assert.Nil(t, info.EpochLastBlockNumber)
 	assert.Nil(t, err)
 
 	info, err = engine.APIs(blockchain)[0].Service.(*XDPoS.API).GetBlockInfoByEpochNum(6)

@@ -25,9 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru"
-
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/common/lru"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
 	"github.com/XinFinOrg/XDPoSChain/consensus/XDPoS"
 	"github.com/XinFinOrg/XDPoSChain/consensus/misc"
@@ -104,14 +103,14 @@ type ProtocolManager struct {
 	// wait group is used for graceful shutdowns during downloading
 	// and processing
 	wg             sync.WaitGroup
-	knownTxs       *lru.Cache
-	knowOrderTxs   *lru.Cache
-	knowLendingTxs *lru.Cache
+	knownTxs       *lru.Cache[common.Hash, struct{}]
+	knowOrderTxs   *lru.Cache[common.Hash, struct{}]
+	knowLendingTxs *lru.Cache[common.Hash, struct{}]
 
 	// V2 messages
-	knownVotes     *lru.Cache
-	knownSyncInfos *lru.Cache
-	knownTimeouts  *lru.Cache
+	knownVotes     *lru.Cache[common.Hash, struct{}]
+	knownSyncInfos *lru.Cache[common.Hash, struct{}]
+	knownTimeouts  *lru.Cache[common.Hash, struct{}]
 }
 
 // NewProtocolManagerEx add order pool to protocol
@@ -128,14 +127,6 @@ func NewProtocolManagerEx(config *params.ChainConfig, mode downloader.SyncMode, 
 // NewProtocolManager returns a new ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the ethereum network.
 func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, networkID uint64, mux *event.TypeMux, txpool txPool, engine consensus.Engine, blockchain *core.BlockChain, chaindb ethdb.Database) (*ProtocolManager, error) {
-	knownTxs, _ := lru.New(maxKnownTxs)
-	knowOrderTxs, _ := lru.New(maxKnownOrderTxs)
-	knowLendingTxs, _ := lru.New(maxKnownLendingTxs)
-
-	knownVotes, _ := lru.New(maxKnownVote)
-	knownSyncInfos, _ := lru.New(maxKnownSyncInfo)
-	knownTimeouts, _ := lru.New(maxKnownTimeout)
-
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		networkId:      networkID,
@@ -148,12 +139,12 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 		noMorePeers:    make(chan struct{}),
 		txsyncCh:       make(chan *txsync),
 		quitSync:       make(chan struct{}),
-		knownTxs:       knownTxs,
-		knowOrderTxs:   knowOrderTxs,
-		knowLendingTxs: knowLendingTxs,
-		knownVotes:     knownVotes,
-		knownSyncInfos: knownSyncInfos,
-		knownTimeouts:  knownTimeouts,
+		knownTxs:       lru.NewCache[common.Hash, struct{}](maxKnownTxs),
+		knowOrderTxs:   lru.NewCache[common.Hash, struct{}](maxKnownOrderTxs),
+		knowLendingTxs: lru.NewCache[common.Hash, struct{}](maxKnownLendingTxs),
+		knownVotes:     lru.NewCache[common.Hash, struct{}](maxKnownVote),
+		knownSyncInfos: lru.NewCache[common.Hash, struct{}](maxKnownSyncInfo),
+		knownTimeouts:  lru.NewCache[common.Hash, struct{}](maxKnownTimeout),
 		orderpool:      nil,
 		lendingpool:    nil,
 		orderTxSub:     nil,
@@ -218,10 +209,10 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 	}
 
 	// Construct the different synchronisation mechanisms
-	manager.downloader = downloader.New(mode, chaindb, manager.eventMux, blockchain, nil, manager.removePeer, handleProposedBlock)
+	manager.downloader = downloader.New(chaindb, manager.eventMux, blockchain, nil, manager.removePeer, handleProposedBlock)
 
 	validator := func(header *types.Header) error {
-		return engine.VerifyHeader(blockchain, header, true)
+		return engine.VerifyHeader(blockchain, header, true, true)
 	}
 
 	heighter := func() uint64 {
@@ -266,9 +257,11 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 func (pm *ProtocolManager) addOrderPoolProtocol(orderpool orderPool) {
 	pm.orderpool = orderpool
 }
+
 func (pm *ProtocolManager) addLendingPoolProtocol(lendingpool lendingPool) {
 	pm.lendingpool = lendingpool
 }
+
 func (pm *ProtocolManager) removePeer(id string) {
 	// Short circuit if the peer was already removed
 	peer := pm.peers.Peer(id)
@@ -283,9 +276,7 @@ func (pm *ProtocolManager) removePeer(id string) {
 		log.Debug("Peer removal failed", "peer", id, "err", err)
 	}
 	// Hard disconnect at the networking layer
-	if peer != nil {
-		peer.Peer.Disconnect(p2p.DiscUselessPeer)
-	}
+	peer.Peer.Disconnect(p2p.DiscUselessPeer)
 }
 
 func (pm *ProtocolManager) Start(maxPeers int) {
@@ -642,7 +633,14 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				return errResp(ErrDecode, "msg %v: %v", msg, err)
 			}
 			// Retrieve the requested state entry, stopping if enough was found
-			if entry, err := pm.blockchain.TrieNode(hash); err == nil {
+			// todo now the code and trienode is mixed in the protocol level,
+			// separate these two types.
+			entry, err := pm.blockchain.TrieNode(hash)
+			if len(entry) == 0 || err != nil {
+				// Read the contract code with prefix only to save unnecessary lookups.
+				entry, err = pm.blockchain.ContractCodeWithPrefix(hash)
+			}
+			if err == nil && len(entry) > 0 {
 				data = append(data, entry)
 				bytes += len(entry)
 			}
@@ -769,7 +767,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err := msg.Decode(&txs); err != nil {
 			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
-		var unkownTxs []*types.Transaction
 
 		for i, tx := range txs {
 			// Validate and mark the remote transaction
@@ -777,11 +774,10 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				return errResp(ErrDecode, "transaction %d is nil", i)
 			}
 			p.MarkTransaction(tx.Hash())
-			exist, _ := pm.knownTxs.ContainsOrAdd(tx.Hash(), true)
-			if !exist {
-				unkownTxs = append(unkownTxs, tx)
-			} else {
+			if pm.knownTxs.Contains(tx.Hash()) {
 				log.Trace("Discard known tx", "hash", tx.Hash(), "nonce", tx.Nonce(), "to", tx.To())
+			} else {
+				pm.knownTxs.Add(tx.Hash(), struct{}{})
 			}
 
 		}
@@ -797,7 +793,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err := msg.Decode(&txs); err != nil {
 			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
-		var unkownOrderTxs []*types.OrderTransaction
 
 		for i, tx := range txs {
 			// Validate and mark the remote transaction
@@ -805,13 +800,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				return errResp(ErrDecode, "transaction %d is nil", i)
 			}
 			p.MarkOrderTransaction(tx.Hash())
-			exist, _ := pm.knowOrderTxs.ContainsOrAdd(tx.Hash(), true)
-			if !exist {
-				unkownOrderTxs = append(unkownOrderTxs, tx)
-			} else {
+			if pm.knowOrderTxs.Contains(tx.Hash()) {
 				log.Trace("Discard known tx", "hash", tx.Hash(), "nonce", tx.Nonce())
+			} else {
+				pm.knowOrderTxs.Add(tx.Hash(), struct{}{})
 			}
-
 		}
 
 		if pm.orderpool != nil {
@@ -828,7 +821,6 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		if err := msg.Decode(&txs); err != nil {
 			return errResp(ErrDecode, "msg %v: %v", msg, err)
 		}
-		var unkownLendingTxs []*types.LendingTransaction
 
 		for i, tx := range txs {
 			// Validate and mark the remote transaction
@@ -836,13 +828,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 				return errResp(ErrDecode, "transaction %d is nil", i)
 			}
 			p.MarkLendingTransaction(tx.Hash())
-			exist, _ := pm.knowLendingTxs.ContainsOrAdd(tx.Hash(), true)
-			if !exist {
-				unkownLendingTxs = append(unkownLendingTxs, tx)
-			} else {
+			if pm.knowLendingTxs.Contains(tx.Hash()) {
 				log.Trace("Discard known tx", "hash", tx.Hash(), "nonce", tx.Nonce())
+			} else {
+				pm.knowLendingTxs.Add(tx.Hash(), struct{}{})
 			}
-
 		}
 
 		if pm.lendingpool != nil {
@@ -859,11 +849,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		p.MarkVote(vote.Hash())
 
-		exist, _ := pm.knownVotes.ContainsOrAdd(vote.Hash(), true)
-		if !exist {
-			go pm.bft.Vote(p.id, &vote)
-		} else {
+		if pm.knownVotes.Contains(vote.Hash()) {
 			log.Trace("Discarded vote, known vote", "vote hash", vote.Hash(), "voted block hash", vote.ProposedBlockInfo.Hash.Hex(), "number", vote.ProposedBlockInfo.Number, "round", vote.ProposedBlockInfo.Round)
+		} else {
+			pm.knownVotes.Add(vote.Hash(), struct{}{})
+			go pm.bft.Vote(p.id, &vote)
 		}
 
 	case msg.Code == TimeoutMsg:
@@ -877,12 +867,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		p.MarkTimeout(timeout.Hash())
 
-		exist, _ := pm.knownTimeouts.ContainsOrAdd(timeout.Hash(), true)
-
-		if !exist {
-			go pm.bft.Timeout(p.id, &timeout)
-		} else {
+		if pm.knownTimeouts.Contains(timeout.Hash()) {
 			log.Trace("Discarded Timeout, known Timeout", "Signature", timeout.Signature, "hash", timeout.Hash(), "round", timeout.Round)
+		} else {
+			pm.knownTimeouts.Add(timeout.Hash(), struct{}{})
+			go pm.bft.Timeout(p.id, &timeout)
 		}
 
 	case msg.Code == SyncInfoMsg:
@@ -896,11 +885,11 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 		p.MarkSyncInfo(syncInfo.Hash())
 
-		exist, _ := pm.knownSyncInfos.ContainsOrAdd(syncInfo.Hash(), true)
-		if !exist {
-			go pm.bft.SyncInfo(p.id, &syncInfo)
-		} else {
+		if pm.knownSyncInfos.Contains(syncInfo.Hash()) {
 			log.Trace("Discarded SyncInfo, known SyncInfo", "hash", syncInfo.Hash())
+		} else {
+			pm.knownSyncInfos.Add(syncInfo.Hash(), struct{}{})
+			go pm.bft.SyncInfo(p.id, &syncInfo)
 		}
 
 	default:
@@ -1037,12 +1026,12 @@ func (pm *ProtocolManager) LendingBroadcastTx(hash common.Hash, tx *types.Lendin
 }
 
 // minedBroadcastLoop broadcast loop
-func (self *ProtocolManager) minedBroadcastLoop() {
+func (pm *ProtocolManager) minedBroadcastLoop() {
 	// automatically stops if unsubscribe
-	for obj := range self.minedBlockSub.Chan() {
+	for obj := range pm.minedBlockSub.Chan() {
 		switch ev := obj.Data.(type) {
 		case core.NewMinedBlockEvent:
-			self.BroadcastBlock(ev.Block, true) // First propagate block to peers
+			pm.BroadcastBlock(ev.Block, true) // First propagate block to peers
 			//self.BroadcastBlock(ev.Block, false) // Only then announce to the rest
 		}
 	}
@@ -1062,34 +1051,34 @@ func (pm *ProtocolManager) txBroadcastLoop() {
 }
 
 // orderTxBroadcastLoop broadcast order
-func (self *ProtocolManager) orderTxBroadcastLoop() {
-	if self.orderTxSub == nil {
+func (pm *ProtocolManager) orderTxBroadcastLoop() {
+	if pm.orderTxSub == nil {
 		return
 	}
 	for {
 		select {
-		case event := <-self.orderTxCh:
-			self.OrderBroadcastTx(event.Tx.Hash(), event.Tx)
+		case event := <-pm.orderTxCh:
+			pm.OrderBroadcastTx(event.Tx.Hash(), event.Tx)
 
 			// Err() channel will be closed when unsubscribing.
-		case <-self.orderTxSub.Err():
+		case <-pm.orderTxSub.Err():
 			return
 		}
 	}
 }
 
 // lendingTxBroadcastLoop broadcast order
-func (self *ProtocolManager) lendingTxBroadcastLoop() {
-	if self.lendingTxSub == nil {
+func (pm *ProtocolManager) lendingTxBroadcastLoop() {
+	if pm.lendingTxSub == nil {
 		return
 	}
 	for {
 		select {
-		case event := <-self.lendingTxCh:
-			self.LendingBroadcastTx(event.Tx.Hash(), event.Tx)
+		case event := <-pm.lendingTxCh:
+			pm.LendingBroadcastTx(event.Tx.Hash(), event.Tx)
 
 			// Err() channel will be closed when unsubscribing.
-		case <-self.lendingTxSub.Err():
+		case <-pm.lendingTxSub.Err():
 			return
 		}
 	}
@@ -1098,7 +1087,7 @@ func (self *ProtocolManager) lendingTxBroadcastLoop() {
 // NodeInfo represents a short summary of the Ethereum sub-protocol metadata
 // known about the host peer.
 type NodeInfo struct {
-	Network    uint64              `json:"network"`    // Ethereum network ID (1=Frontier, 2=Morden, Ropsten=3, Rinkeby=4)
+	Network    uint64              `json:"network"`    // XDC network ID (50=xinfin, 51=apothem, 551=devnet)
 	Difficulty *big.Int            `json:"difficulty"` // Total difficulty of the host's blockchain
 	Genesis    common.Hash         `json:"genesis"`    // SHA3 hash of the host's genesis block
 	Config     *params.ChainConfig `json:"config"`     // Chain configuration for the fork rules
@@ -1106,13 +1095,13 @@ type NodeInfo struct {
 }
 
 // NodeInfo retrieves some protocol metadata about the running host node.
-func (self *ProtocolManager) NodeInfo() *NodeInfo {
-	currentBlock := self.blockchain.CurrentBlock()
+func (pm *ProtocolManager) NodeInfo() *NodeInfo {
+	currentBlock := pm.blockchain.CurrentBlock()
 	return &NodeInfo{
-		Network:    self.networkId,
-		Difficulty: self.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64()),
-		Genesis:    self.blockchain.Genesis().Hash(),
-		Config:     self.blockchain.Config(),
+		Network:    pm.networkId,
+		Difficulty: pm.blockchain.GetTd(currentBlock.Hash(), currentBlock.NumberU64()),
+		Genesis:    pm.blockchain.Genesis().Hash(),
+		Config:     pm.blockchain.Config(),
 		Head:       currentBlock.Hash(),
 	}
 }

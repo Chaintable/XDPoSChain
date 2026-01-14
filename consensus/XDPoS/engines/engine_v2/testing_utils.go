@@ -15,7 +15,7 @@ func (x *XDPoS_v2) SetNewRoundFaker(blockChainReader consensus.ChainReader, newR
 	defer x.lock.Unlock()
 	// Reset a bunch of things
 	if resetTimer {
-		x.timeoutWorker.Reset(blockChainReader)
+		x.timeoutWorker.Reset(blockChainReader, 0, 0)
 	}
 	x.currentRound = newRound
 }
@@ -36,12 +36,12 @@ func (x *XDPoS_v2) GetCurrentRoundFaker() types.Round {
 
 // Utils for test to get current Pool size
 func (x *XDPoS_v2) GetVotePoolSizeFaker(vote *types.Vote) int {
-	return x.votePool.Size(vote)
+	return x.votePool.Size(vote.PoolKey())
 }
 
 // Utils for test to get Timeout Pool Size
 func (x *XDPoS_v2) GetTimeoutPoolSizeFaker(timeout *types.Timeout) int {
-	return x.timeoutPool.Size(timeout)
+	return x.timeoutPool.Size(timeout.PoolKey())
 }
 
 // WARN: This function is designed for testing purpose only!

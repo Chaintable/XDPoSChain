@@ -18,6 +18,7 @@ package bitutil
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -48,17 +49,21 @@ func TestEncodingCycle(t *testing.T) {
 		"0xdf7070533534333636313639343638373532313536346c1bc333393438373130707063363430353639343638373532313536346c1bc333393438336336346c65fe",
 	}
 	for i, tt := range tests {
-		data := hexutil.MustDecode(tt)
-
-		proc, err := bitsetDecodeBytes(bitsetEncodeBytes(data), len(data))
-		if err != nil {
-			t.Errorf("test %d: failed to decompress compressed data: %v", i, err)
-			continue
-		}
-		if !bytes.Equal(data, proc) {
-			t.Errorf("test %d: compress/decompress mismatch: have %x, want %x", i, proc, data)
+		if err := testEncodingCycle(hexutil.MustDecode(tt)); err != nil {
+			t.Errorf("test %d: %v", i, err)
 		}
 	}
+}
+
+func testEncodingCycle(data []byte) error {
+	proc, err := bitsetDecodeBytes(bitsetEncodeBytes(data), len(data))
+	if err != nil {
+		return fmt.Errorf("failed to decompress compressed data: %v", err)
+	}
+	if !bytes.Equal(data, proc) {
+		return fmt.Errorf("compress/decompress mismatch: have %x, want %x", proc, data)
+	}
+	return nil
 }
 
 // Tests that data bitset decoding and rencoding works and is bijective.
@@ -117,7 +122,7 @@ func TestDecodingCycle(t *testing.T) {
 // TestCompression tests that compression works by returning either the bitset
 // encoded input, or the actual input if the bitset version is longer.
 func TestCompression(t *testing.T) {
-	// Check the the compression returns the bitset encoding is shorter
+	// Check the compression returns the bitset encoding is shorter
 	in := hexutil.MustDecode("0x4912385c0e7b64000000")
 	out := hexutil.MustDecode("0x80fe4912385c0e7b64")
 
@@ -127,7 +132,7 @@ func TestCompression(t *testing.T) {
 	if data, err := DecompressBytes(out, len(in)); err != nil || !bytes.Equal(data, in) {
 		t.Errorf("decoding mismatch for sparse data: have %x, want %x, error %v", data, in, err)
 	}
-	// Check the the compression returns the input if the bitset encoding is longer
+	// Check the compression returns the input if the bitset encoding is longer
 	in = hexutil.MustDecode("0xdf7070533534333636313639343638373532313536346c1bc33339343837313070706336343035336336346c65fefb3930393233383838ac2f65fefb")
 	out = hexutil.MustDecode("0xdf7070533534333636313639343638373532313536346c1bc33339343837313070706336343035336336346c65fefb3930393233383838ac2f65fefb")
 
@@ -177,5 +182,43 @@ func benchmarkEncoding(b *testing.B, bytes int, fill float64) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		bitsetDecodeBytes(bitsetEncodeBytes(data), len(data))
+	}
+}
+
+func FuzzEncoder(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if err := testEncodingCycle(data); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func FuzzDecoder(f *testing.F) {
+	f.Fuzz(func(t *testing.T, data []byte) {
+		fuzzDecode(data)
+	})
+}
+
+// fuzzDecode implements a go-fuzz fuzzer method to test the bit decoding and
+// reencoding algorithm.
+func fuzzDecode(data []byte) {
+	blob, err := DecompressBytes(data, 1024)
+	if err != nil {
+		return
+	}
+	// re-compress it (it's OK if the re-compressed differs from the
+	// original - the first input may not have been compressed at all)
+	comp := CompressBytes(blob)
+	if len(comp) > len(blob) {
+		// After compression, it must be smaller or equal
+		panic("bad compression")
+	}
+	// But decompressing it once again should work
+	decomp, err := DecompressBytes(data, 1024)
+	if err != nil {
+		panic(err)
+	}
+	if !bytes.Equal(decomp, blob) {
+		panic("content mismatch")
 	}
 }

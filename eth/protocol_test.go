@@ -32,7 +32,7 @@ import (
 )
 
 func init() {
-	// log.Root().SetHandler(log.LvlFilterHandler(log.LvlTrace, log.StreamHandler(os.Stderr, log.TerminalFormat(false))))
+	// log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelTrace, false)))
 }
 
 var testAccount, _ = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
@@ -65,7 +65,7 @@ func testStatusMsgErrors(t *testing.T, protocol int) {
 		},
 		{
 			code: StatusMsg, data: statusData{uint32(protocol), 999, td, head.Hash(), genesis.Hash()},
-			wantError: errResp(ErrNetworkIdMismatch, "999 (!= 88)"),
+			wantError: errResp(ErrNetworkIdMismatch, "999 (!= 0)"),
 		},
 		{
 			code: StatusMsg, data: statusData{uint32(protocol), ethconfig.Defaults.NetworkId, td, head.Hash(), common.Hash{3}},

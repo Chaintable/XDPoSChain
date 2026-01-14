@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -19,14 +20,14 @@ import (
 
 func AttachConsensusV2Hooks(adaptor *XDPoS.XDPoS, bc *core.BlockChain, chainConfig *params.ChainConfig) {
 	// Hook scans for bad masternodes and decide to penalty them
-	adaptor.EngineV2.HookPenalty = func(chain consensus.ChainReader, number *big.Int, currentHash common.Hash, candidates []common.Address) ([]common.Address, error) {
+	adaptor.EngineV2.HookPenalty = func(chain consensus.ChainReader, number *big.Int, parentHash common.Hash, candidates []common.Address) ([]common.Address, error) {
 		start := time.Now()
 		listBlockHash := []common.Hash{}
 		// get list block hash & stats total created block
 		statMiners := make(map[common.Address]int)
-		listBlockHash = append(listBlockHash, currentHash)
+		listBlockHash = append(listBlockHash, parentHash)
 		parentNumber := number.Uint64() - 1
-		parentHash := currentHash
+		currentHash := parentHash
 
 		// check and wait the latest block is already in the disk
 		// sometimes blocks are yet inserted into block
@@ -46,6 +47,10 @@ func AttachConsensusV2Hooks(adaptor *XDPoS.XDPoS, bc *core.BlockChain, chainConf
 
 		for i := uint64(1); ; i++ {
 			parentHeader := chain.GetHeader(parentHash, parentNumber)
+			if parentHeader == nil {
+				log.Error("[HookPenalty] fail to get parent header")
+				return []common.Address{}, fmt.Errorf("hook penalty fail to get parent header at number: %v, hash: %v", parentNumber, parentHash)
+			}
 			isEpochSwitch, _, err := adaptor.EngineV2.IsEpochSwitch(parentHeader)
 			if err != nil {
 				log.Error("[HookPenalty] isEpochSwitch", "err", err)
@@ -115,15 +120,14 @@ func AttachConsensusV2Hooks(adaptor *XDPoS.XDPoS, bc *core.BlockChain, chainConf
 			if blockNumber%common.MergeSignRange == 0 {
 				mapBlockHash[bhash] = true
 			}
-			signData, ok := adaptor.GetCachedSigningTxs(bhash)
+			signingTxs, ok := adaptor.GetCachedSigningTxs(bhash)
 			if !ok {
 				block := chain.GetBlock(bhash, blockNumber)
 				txs := block.Transactions()
-				signData = adaptor.CacheSigningTxs(bhash, txs)
+				signingTxs = adaptor.CacheSigningTxs(bhash, txs)
 			}
-			txs := signData.([]*types.Transaction)
 			// Check signer signed?
-			for _, tx := range txs {
+			for _, tx := range signingTxs {
 				blkHash := common.BytesToHash(tx.Data()[len(tx.Data())-32:])
 				from := *tx.From()
 				if mapBlockHash[blkHash] {
@@ -195,7 +199,7 @@ func AttachConsensusV2Hooks(adaptor *XDPoS.XDPoS, bc *core.BlockChain, chainConf
 		voterResults := make(map[common.Address]interface{})
 		if len(signers) > 0 {
 			for signer, calcReward := range rewardSigners {
-				err, rewards := contracts.CalculateRewardForHolders(foundationWalletAddr, parentState, signer, calcReward, number)
+				rewards, err := contracts.CalculateRewardForHolders(foundationWalletAddr, parentState, signer, calcReward, number)
 				if err != nil {
 					log.Error("[HookReward] Fail to calculate reward for holders.", "error", err)
 					return nil, err
@@ -223,6 +227,11 @@ func GetSigningTxCount(c *XDPoS.XDPoS, chain consensus.ChainReader, header *type
 	signers := make(map[common.Address]*contracts.RewardLog)
 	mapBlkHash := map[uint64]common.Hash{}
 
+	// prevent overflow
+	if number == 0 {
+		return signers, nil
+	}
+
 	data := make(map[common.Hash][]common.Address)
 	epochCount := 0
 	var masternodes []common.Address
@@ -245,18 +254,23 @@ func GetSigningTxCount(c *XDPoS.XDPoS, chain consensus.ChainReader, header *type
 			}
 		}
 		mapBlkHash[i] = header.Hash()
-		signData, ok := c.GetCachedSigningTxs(header.Hash())
+		signingTxs, ok := c.GetCachedSigningTxs(header.Hash())
 		if !ok {
 			log.Debug("Failed get from cached", "hash", header.Hash().String(), "number", i)
 			block := chain.GetBlock(header.Hash(), i)
-			txs := block.Transactions()
-			signData = c.CacheSigningTxs(header.Hash(), txs)
+			if block != nil {
+				txs := block.Transactions()
+				signingTxs = c.CacheSigningTxs(header.Hash(), txs)
+			}
 		}
-		txs := signData.([]*types.Transaction)
-		for _, tx := range txs {
+		for _, tx := range signingTxs {
 			blkHash := common.BytesToHash(tx.Data()[len(tx.Data())-32:])
 			from := *tx.From()
 			data[blkHash] = append(data[blkHash], from)
+		}
+		// prevent overflow
+		if i == 0 {
+			return signers, nil
 		}
 	}
 

@@ -17,9 +17,11 @@
 package eth
 
 import (
-	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"reflect"
 	"testing"
+
+	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
+	"github.com/XinFinOrg/XDPoSChain/core/types"
 
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
@@ -32,7 +34,7 @@ func TestStorageRangeAt(t *testing.T) {
 	// Create a state where account 0x010000... has a few storage entries.
 	var (
 		db       = rawdb.NewMemoryDatabase()
-		state, _ = state.New(common.Hash{}, state.NewDatabase(db))
+		state, _ = state.New(types.EmptyRootHash, state.NewDatabase(db))
 		addr     = common.Address{0x01}
 		keys     = []common.Hash{ // hashes of Keys of storage
 			common.HexToHash("340dd630ad21bf010b4e676dbfa9ba9a02175262d1fa356232cfde6cb5b47ef2"),
@@ -84,7 +86,7 @@ func TestStorageRangeAt(t *testing.T) {
 			t.Error(err)
 		}
 		if !reflect.DeepEqual(result, test.want) {
-			t.Fatalf("wrong result for range 0x%x.., limit %d:\ngot %s\nwant %s",
+			t.Fatalf("wrong result for range %#x.., limit %d:\ngot %s\nwant %s",
 				test.start, test.limit, dumper.Sdump(result), dumper.Sdump(&test.want))
 		}
 	}

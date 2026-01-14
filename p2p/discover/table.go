@@ -23,6 +23,7 @@
 package discover
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -36,6 +37,7 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/log"
+	"github.com/XinFinOrg/XDPoSChain/metrics"
 	"github.com/XinFinOrg/XDPoSChain/p2p/netutil"
 )
 
@@ -72,7 +74,10 @@ type Table struct {
 	rand    *mrand.Rand       // source of randomness, periodically reseeded
 	ips     netutil.DistinctNetSet
 
-	db         *nodeDB // database of known nodes
+	db  *nodeDB // database of known nodes
+	log log.Logger
+
+	// loop channels
 	refreshReq chan chan struct{}
 	initDone   chan struct{}
 	closeReq   chan struct{}
@@ -82,7 +87,8 @@ type Table struct {
 	bonding   map[NodeID]*bondproc
 	bondslots chan struct{} // limits total number of active bonding processes
 
-	nodeAddedHook func(*Node) // for testing
+	nodeAddedHook   func(*bucket, *Node)
+	nodeRemovedHook func(*bucket, *Node)
 
 	net  transport
 	self *Node // metadata of the local node
@@ -110,6 +116,7 @@ type bucket struct {
 	entries      []*Node // live entries, sorted by time of last contact
 	replacements []*Node // recently seen nodes to be used if revalidation fails
 	ips          netutil.DistinctNetSet
+	index        int
 }
 
 func newTable(t transport, ourID NodeID, ourAddr *net.UDPAddr, nodeDBPath string, bootnodes []*Node) (*Table, error) {
@@ -118,9 +125,11 @@ func newTable(t transport, ourID NodeID, ourAddr *net.UDPAddr, nodeDBPath string
 	if err != nil {
 		return nil, err
 	}
+
 	tab := &Table{
 		net:        t,
 		db:         db,
+		log:        log.Root(),
 		self:       NewNode(ourID, ourAddr.IP, uint16(ourAddr.Port), uint16(ourAddr.Port)),
 		bonding:    make(map[NodeID]*bondproc),
 		bondslots:  make(chan struct{}, maxBondingPingPongs),
@@ -139,7 +148,8 @@ func newTable(t transport, ourID NodeID, ourAddr *net.UDPAddr, nodeDBPath string
 	}
 	for i := range tab.buckets {
 		tab.buckets[i] = &bucket{
-			ips: netutil.DistinctNetSet{Subnet: bucketSubnet, Limit: bucketIPLimit},
+			index: i,
+			ips:   netutil.DistinctNetSet{Subnet: bucketSubnet, Limit: bucketIPLimit},
 		}
 	}
 	tab.seedRand()
@@ -149,6 +159,22 @@ func newTable(t transport, ourID NodeID, ourAddr *net.UDPAddr, nodeDBPath string
 	// expiration.
 	tab.db.ensureExpirer()
 	go tab.loop()
+	return tab, nil
+}
+
+func newMeteredTable(t transport, ourID NodeID, ourAddr *net.UDPAddr, nodeDBPath string, bootnodes []*Node) (*Table, error) {
+	tab, err := newTable(t, ourID, ourAddr, nodeDBPath, bootnodes)
+	if err != nil {
+		return nil, err
+	}
+	if metrics.Enabled() {
+		tab.nodeAddedHook = func(b *bucket, n *Node) {
+			bucketsCounter[b.index].Inc(1)
+		}
+		tab.nodeRemovedHook = func(b *bucket, n *Node) {
+			bucketsCounter[b.index].Dec(1)
+		}
+	}
 	return tab, nil
 }
 
@@ -322,10 +348,10 @@ func (tab *Table) lookup(targetID NodeID, refreshIfEmpty bool) []*Node {
 						// Bump the failure counter to detect and evacuate non-bonded entries
 						fails := tab.db.findFails(n.ID) + 1
 						tab.db.updateFindFails(n.ID, fails)
-						log.Trace("Bumping findnode failure counter", "id", n.ID, "failcount", fails)
+						tab.log.Trace("Bumping findnode failure counter", "id", n.ID, "failcount", fails)
 
 						if fails >= maxFindnodeFailures {
-							log.Trace("Too many findnode failures, dropping", "id", n.ID, "failcount", fails)
+							tab.log.Trace("Too many findnode failures, dropping", "id", n.ID, "failcount", fails)
 							tab.delete(n)
 						}
 					}
@@ -455,8 +481,10 @@ func (tab *Table) loadSeedNodes(bond bool) {
 	}
 	for i := range seeds {
 		seed := seeds[i]
-		age := log.Lazy{Fn: func() interface{} { return time.Since(tab.db.bondTime(seed.ID)) }}
-		log.Debug("Found seed node in database", "id", seed.ID, "addr", seed.addr(), "age", age)
+		if tab.log.Enabled(context.Background(), log.LevelTrace) {
+			age := time.Since(tab.db.bondTime(seed.ID))
+			tab.log.Debug("Found seed node in database", "id", seed.ID, "addr", seed.addr(), "age", age)
+		}
 		tab.add(seed)
 	}
 }
@@ -480,16 +508,16 @@ func (tab *Table) doRevalidate(done chan<- struct{}) {
 	b := tab.buckets[bi]
 	if err == nil {
 		// The node responded, move it to the front.
-		log.Debug("Revalidated node", "b", bi, "id", last.ID)
+		tab.log.Debug("Revalidated node", "b", bi, "id", last.ID)
 		b.bump(last)
 		return
 	}
 	// No reply received, pick a replacement or delete the node if there aren't
 	// any replacements.
 	if r := tab.replace(b, last); r != nil {
-		log.Debug("Replaced dead node", "b", bi, "id", last.ID, "ip", last.IP, "r", r.ID, "rip", r.IP)
+		tab.log.Debug("Replaced dead node", "b", bi, "id", last.ID, "ip", last.IP, "r", r.ID, "rip", r.IP)
 	} else {
-		log.Debug("Removed dead node", "b", bi, "id", last.ID, "ip", last.IP)
+		tab.log.Debug("Removed dead node", "b", bi, "id", last.ID, "ip", last.IP)
 	}
 }
 
@@ -599,7 +627,7 @@ func (tab *Table) bond(pinged bool, id NodeID, addr *net.UDPAddr, tcpPort uint16
 	age := time.Since(tab.db.bondTime(id))
 	var result error
 	if fails > 0 || age > nodeDBNodeExpiration {
-		log.Trace("Starting bonding ping/pong", "id", id, "known", node != nil, "failcount", fails, "age", age)
+		tab.log.Trace("Starting bonding ping/pong", "id", id, "known", node != nil, "failcount", fails, "age", age)
 
 		tab.bondmu.Lock()
 		w := tab.bonding[id]
@@ -724,11 +752,11 @@ func (tab *Table) addIP(b *bucket, ip net.IP) bool {
 		return true
 	}
 	if !tab.ips.Add(ip) {
-		log.Debug("IP exceeds table limit", "ip", ip)
+		tab.log.Debug("IP exceeds table limit", "ip", ip)
 		return false
 	}
 	if !b.ips.Add(ip) {
-		log.Debug("IP exceeds bucket limit", "ip", ip)
+		tab.log.Debug("IP exceeds bucket limit", "ip", ip)
 		tab.ips.Remove(ip)
 		return false
 	}
@@ -806,14 +834,31 @@ func (tab *Table) bumpOrAdd(b *bucket, n *Node) bool {
 	b.replacements = deleteNode(b.replacements, n)
 	n.addedAt = time.Now()
 	if tab.nodeAddedHook != nil {
-		tab.nodeAddedHook(n)
+		tab.nodeAddedHook(b, n)
 	}
 	return true
 }
 
 func (tab *Table) deleteInBucket(b *bucket, n *Node) {
+	// Check if the node is actually in the bucket so the removed hook
+	// isn't called multiple times for the same node.
+	if !contains(b.entries, n.ID) {
+		return
+	}
 	b.entries = deleteNode(b.entries, n)
 	tab.removeIP(b, n.IP)
+	if tab.nodeRemovedHook != nil {
+		tab.nodeRemovedHook(b, n)
+	}
+}
+
+func contains(ns []*Node, id NodeID) bool {
+	for _, n := range ns {
+		if n.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // pushNode adds n to the front of list, keeping at most max items.

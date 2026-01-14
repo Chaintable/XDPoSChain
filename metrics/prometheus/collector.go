@@ -51,21 +51,23 @@ func newCollector() *collector {
 // metric type is not supported/known.
 func (c *collector) Add(name string, i any) error {
 	switch m := i.(type) {
-	case metrics.Counter:
+	case *metrics.Counter:
 		c.addCounter(name, m.Snapshot())
-	case metrics.Gauge:
+	case *metrics.CounterFloat64:
+		c.addCounterFloat64(name, m.Snapshot())
+	case *metrics.Gauge:
 		c.addGauge(name, m.Snapshot())
-	case metrics.GaugeFloat64:
+	case *metrics.GaugeFloat64:
 		c.addGaugeFloat64(name, m.Snapshot())
 	case *metrics.GaugeInfo:
 		c.addGaugeInfo(name, m.Snapshot())
 	case metrics.Histogram:
 		c.addHistogram(name, m.Snapshot())
-	case metrics.Meter:
+	case *metrics.Meter:
 		c.addMeter(name, m.Snapshot())
-	case metrics.Timer:
+	case *metrics.Timer:
 		c.addTimer(name, m.Snapshot())
-	case metrics.ResettingTimer:
+	case *metrics.ResettingTimer:
 		c.addResettingTimer(name, m.Snapshot())
 	default:
 		return fmt.Errorf("unknown prometheus metric type %T", i)
@@ -73,15 +75,19 @@ func (c *collector) Add(name string, i any) error {
 	return nil
 }
 
-func (c *collector) addCounter(name string, m metrics.Counter) {
+func (c *collector) addCounter(name string, m metrics.CounterSnapshot) {
 	c.writeGaugeCounter(name, m.Count())
 }
 
-func (c *collector) addGauge(name string, m metrics.Gauge) {
+func (c *collector) addCounterFloat64(name string, m metrics.CounterFloat64Snapshot) {
+	c.writeGaugeCounter(name, m.Count())
+}
+
+func (c *collector) addGauge(name string, m metrics.GaugeSnapshot) {
 	c.writeGaugeCounter(name, m.Value())
 }
 
-func (c *collector) addGaugeFloat64(name string, m metrics.GaugeFloat64) {
+func (c *collector) addGaugeFloat64(name string, m metrics.GaugeFloat64Snapshot) {
 	c.writeGaugeCounter(name, m.Value())
 }
 
@@ -89,7 +95,7 @@ func (c *collector) addGaugeInfo(name string, m metrics.GaugeInfoSnapshot) {
 	c.writeGaugeInfo(name, m.Value())
 }
 
-func (c *collector) addHistogram(name string, m metrics.Histogram) {
+func (c *collector) addHistogram(name string, m metrics.HistogramSnapshot) {
 	pv := []float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999}
 	ps := m.Percentiles(pv)
 	c.writeSummaryCounter(name, m.Count())
@@ -100,11 +106,11 @@ func (c *collector) addHistogram(name string, m metrics.Histogram) {
 	c.buff.WriteRune('\n')
 }
 
-func (c *collector) addMeter(name string, m metrics.Meter) {
+func (c *collector) addMeter(name string, m *metrics.MeterSnapshot) {
 	c.writeGaugeCounter(name, m.Count())
 }
 
-func (c *collector) addTimer(name string, m metrics.Timer) {
+func (c *collector) addTimer(name string, m *metrics.TimerSnapshot) {
 	pv := []float64{0.5, 0.75, 0.95, 0.99, 0.999, 0.9999}
 	ps := m.Percentiles(pv)
 	c.writeSummaryCounter(name, m.Count())
@@ -115,7 +121,7 @@ func (c *collector) addTimer(name string, m metrics.Timer) {
 	c.buff.WriteRune('\n')
 }
 
-func (c *collector) addResettingTimer(name string, m metrics.ResettingTimer) {
+func (c *collector) addResettingTimer(name string, m *metrics.ResettingTimerSnapshot) {
 	if m.Count() <= 0 {
 		return
 	}
@@ -134,7 +140,7 @@ func (c *collector) writeGaugeInfo(name string, value metrics.GaugeInfoValue) {
 	c.buff.WriteString(fmt.Sprintf(typeGaugeTpl, name))
 	c.buff.WriteString(name)
 	c.buff.WriteString(" ")
-	var kvs []string
+	kvs := make([]string, 0, len(value))
 	for k, v := range value {
 		kvs = append(kvs, fmt.Sprintf("%v=%q", k, v))
 	}

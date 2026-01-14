@@ -22,13 +22,13 @@ import (
 	"math/rand"
 	"time"
 
-	lru "github.com/hashicorp/golang-lru"
-
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/common/lru"
 	"github.com/XinFinOrg/XDPoSChain/common/prque"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/log"
+	"github.com/XinFinOrg/XDPoSChain/trie"
 )
 
 const (
@@ -132,10 +132,10 @@ type Fetcher struct {
 	completing map[common.Hash]*announce   // Blocks with headers, currently body-completing
 
 	// Block cache
-	queue  *prque.Prque            // Queue containing the import operations (block number sorted)
-	queues map[string]int          // Per peer block counts to prevent memory exhaustion
-	queued map[common.Hash]*inject // Set of already queued blocks (to dedup imports)
-	knowns *lru.ARCCache
+	queue  *prque.Prque[int64, *inject] // Queue containing the import operations (block number sorted)
+	queues map[string]int               // Per peer block counts to prevent memory exhaustion
+	queued map[common.Hash]*inject      // Set of already queued blocks (to dedup imports)
+	knowns *lru.Cache[common.Hash, struct{}]
 	// Callbacks
 	getBlock            blockRetrievalFn      // Retrieves a block from the local chain
 	verifyHeader        headerVerifierFn      // Checks if a block's headers have a valid proof of work
@@ -157,7 +157,6 @@ type Fetcher struct {
 
 // New creates a block fetcher to retrieve blocks based on hash announcements.
 func New(getBlock blockRetrievalFn, verifyHeader headerVerifierFn, handleProposedBlock proposeBlockHandlerFn, broadcastBlock blockBroadcasterFn, chainHeight chainHeightFn, insertBlock blockInsertFn, prepareBlock blockPrepareFn, dropPeer peerDropFn) *Fetcher {
-	knownBlocks, _ := lru.NewARC(blockLimit)
 	return &Fetcher{
 		notify:              make(chan *announce),
 		inject:              make(chan *inject),
@@ -171,10 +170,10 @@ func New(getBlock blockRetrievalFn, verifyHeader headerVerifierFn, handlePropose
 		fetching:            make(map[common.Hash]*announce),
 		fetched:             make(map[common.Hash][]*announce),
 		completing:          make(map[common.Hash]*announce),
-		queue:               prque.New(nil),
+		queue:               prque.New[int64, *inject](nil),
 		queues:              make(map[string]int),
 		queued:              make(map[common.Hash]*inject),
-		knowns:              knownBlocks,
+		knowns:              lru.NewCache[common.Hash, struct{}](blockLimit),
 		getBlock:            getBlock,
 		verifyHeader:        verifyHeader,
 		handleProposedBlock: handleProposedBlock,
@@ -218,7 +217,7 @@ func (f *Fetcher) Notify(peer string, hash common.Hash, number uint64, time time
 	}
 }
 
-// Enqueue tries to fill gaps the the fetcher's future import queue.
+// Enqueue tries to fill gaps the fetcher's future import queue.
 func (f *Fetcher) Enqueue(peer string, block *types.Block) error {
 	op := &inject{
 		origin: peer,
@@ -305,7 +304,7 @@ func (f *Fetcher) loop() {
 		// Import any queued blocks that could potentially fit
 		height := f.chainHeight()
 		for !f.queue.Empty() {
-			op := f.queue.PopItem().(*inject)
+			op := f.queue.PopItem()
 			if f.queueChangeHook != nil {
 				f.queueChangeHook(op.block.Hash(), false)
 			}
@@ -474,7 +473,7 @@ func (f *Fetcher) loop() {
 						announce.time = task.time
 
 						// If the block is empty (header only), short circuit into the final import queue
-						if header.TxHash == types.DeriveSha(types.Transactions{}) && header.UncleHash == types.CalcUncleHash([]*types.Header{}) {
+						if header.TxHash == types.DeriveSha(types.Transactions{}, trie.NewStackTrie(nil)) && header.UncleHash == types.CalcUncleHash([]*types.Header{}) {
 							log.Trace("Block empty, skipping body retrieval", "peer", announce.origin, "number", header.Number, "hash", header.Hash())
 
 							block := types.NewBlockWithHeader(header)
@@ -536,7 +535,7 @@ func (f *Fetcher) loop() {
 
 				for hash, announce := range f.completing {
 					if f.queued[hash] == nil {
-						txnHash := types.DeriveSha(types.Transactions(task.transactions[i]))
+						txnHash := types.DeriveSha(types.Transactions(task.transactions[i]), trie.NewStackTrie(nil))
 						uncleHash := types.CalcUncleHash(task.uncles[i])
 
 						if txnHash == announce.header.TxHash && uncleHash == announce.header.UncleHash && announce.origin == task.peer {
@@ -641,7 +640,7 @@ func (f *Fetcher) enqueue(peer string, block *types.Block) {
 		}
 		f.queues[peer] = count
 		f.queued[hash] = op
-		f.knowns.Add(hash, true)
+		f.knowns.Add(hash, struct{}{})
 		f.queue.Push(op, -int64(block.NumberU64()))
 		if f.queueChangeHook != nil {
 			f.queueChangeHook(op.block.Hash(), true)
@@ -679,7 +678,7 @@ func (f *Fetcher) insert(peer string, block *types.Block) {
 				go f.broadcastBlock(block, true)
 			}
 		case consensus.ErrFutureBlock:
-			delay := time.Unix(block.Time().Int64(), 0).Sub(time.Now()) // nolint: gosimple
+			delay := time.Until(time.Unix(block.Time().Int64(), 0))
 			log.Info("Receive future block", "number", block.NumberU64(), "hash", block.Hash().Hex(), "delay", delay)
 			time.Sleep(delay)
 			goto again

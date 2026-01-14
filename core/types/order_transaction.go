@@ -17,6 +17,7 @@
 package types
 
 import (
+	"bytes"
 	"container/heap"
 	"errors"
 	"io"
@@ -26,8 +27,6 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/rlp"
 )
-
-//go:generate gencodec -type txdata -field-override txdataMarshaling -out gen_tx_json.go
 
 var (
 	// ErrInvalidOrderSig invalidate signer
@@ -236,13 +235,9 @@ type OrderTransactions []*OrderTransaction
 // Len returns the length of s.
 func (s OrderTransactions) Len() int { return len(s) }
 
-// Swap swaps the i'th and the j'th element in s.
-func (s OrderTransactions) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-
-// GetRlp implements Rlpable and returns the i'th element of s in rlp.
-func (s OrderTransactions) GetRlp(i int) []byte {
-	enc, _ := rlp.EncodeToBytes(s[i])
-	return enc
+// EncodeIndex encodes the i'th element of s to w.
+func (s OrderTransactions) EncodeIndex(i int, w *bytes.Buffer) {
+	rlp.Encode(w, s[i])
 }
 
 // OrderTxDifference returns a new set t which is the difference between a to b.

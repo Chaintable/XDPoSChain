@@ -10,22 +10,16 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/XDCx/tradingstate"
 	"github.com/XinFinOrg/XDPoSChain/XDCxDAO"
 	"github.com/XinFinOrg/XDPoSChain/common"
+	"github.com/XinFinOrg/XDPoSChain/common/lru"
 	"github.com/XinFinOrg/XDPoSChain/common/prque"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/log"
-	"github.com/XinFinOrg/XDPoSChain/p2p"
-	"github.com/XinFinOrg/XDPoSChain/rpc"
-	lru "github.com/hashicorp/golang-lru"
-	"golang.org/x/sync/syncmap"
+	"github.com/XinFinOrg/XDPoSChain/node"
 )
 
 const (
-	ProtocolName       = "XDCx"
-	ProtocolVersion    = uint64(1)
-	ProtocolVersionStr = "1.0"
-	overflowIdx        // Indicator of message queue overflow
 	defaultCacheLimit  = 1024
 	MaximumTxMatchSize = 1000
 )
@@ -52,29 +46,12 @@ type XDCX struct {
 	// Order related
 	db         XDCxDAO.XDCXDAO
 	mongodb    XDCxDAO.XDCXDAO
-	Triegc     *prque.Prque          // Priority queue mapping block numbers to tries to gc
-	StateCache tradingstate.Database // State database to reuse between imports (contains state cache)    *XDCx_state.TradingStateDB
-
-	orderNonce map[common.Address]*big.Int
+	Triegc     *prque.Prque[int64, common.Hash] // Priority queue mapping block numbers to tries to gc
+	StateCache tradingstate.Database            // State database to reuse between imports (contains state cache)    *XDCx_state.TradingStateDB
 
 	sdkNode           bool
-	settings          syncmap.Map // holds configuration settings that can be dynamically changed
-	tokenDecimalCache *lru.Cache
-	orderCache        *lru.Cache
-}
-
-func (XDCx *XDCX) Protocols() []p2p.Protocol {
-	return []p2p.Protocol{}
-}
-
-func (XDCx *XDCX) Start(server *p2p.Server) error {
-	return nil
-}
-
-func (XDCx *XDCX) SaveData() {
-}
-func (XDCx *XDCX) Stop() error {
-	return nil
+	tokenDecimalCache *lru.Cache[common.Address, *big.Int]
+	orderCache        *lru.Cache[common.Hash, map[common.Hash]tradingstate.OrderHistoryItem]
 }
 
 func NewLDBEngine(cfg *Config) *XDCxDAO.BatchDatabase {
@@ -93,20 +70,11 @@ func NewMongoDBEngine(cfg *Config) *XDCxDAO.MongoDatabase {
 	return mongoDB
 }
 
-func New(cfg *Config) *XDCX {
-	tokenDecimalCache, err := lru.New(defaultCacheLimit)
-	if err != nil {
-		log.Warn("[XDCx-New] fail to create new lru for token decimal", "error", err)
-	}
-	orderCache, err := lru.New(tradingstate.OrderCacheLimit)
-	if err != nil {
-		log.Warn("[XDCx-New] fail to create new lru for order", "error", err)
-	}
+func New(stack *node.Node, cfg *Config) *XDCX {
 	XDCX := &XDCX{
-		orderNonce:        make(map[common.Address]*big.Int),
-		Triegc:            prque.New(nil),
-		tokenDecimalCache: tokenDecimalCache,
-		orderCache:        orderCache,
+		Triegc:            prque.New[int64, common.Hash](nil),
+		tokenDecimalCache: lru.NewCache[common.Address, *big.Int](defaultCacheLimit),
+		orderCache:        lru.NewCache[common.Hash, map[common.Hash]tradingstate.OrderHistoryItem](tradingstate.OrderCacheLimit),
 	}
 
 	// default DBEngine: levelDB
@@ -119,18 +87,8 @@ func New(cfg *Config) *XDCX {
 	}
 
 	XDCX.StateCache = tradingstate.NewDatabase(XDCX.db)
-	XDCX.settings.Store(overflowIdx, false)
 
 	return XDCX
-}
-
-// Overflow returns an indication if the message queue is full.
-func (XDCx *XDCX) Overflow() bool {
-	val, ok := XDCx.settings.Load(overflowIdx)
-	if !ok {
-		log.Warn("[XDCx-Overflow] fail to load overflow index")
-	}
-	return val.(bool)
 }
 
 func (XDCx *XDCX) IsSDKNode() bool {
@@ -143,23 +101,6 @@ func (XDCx *XDCX) GetLevelDB() XDCxDAO.XDCXDAO {
 
 func (XDCx *XDCX) GetMongoDB() XDCxDAO.XDCXDAO {
 	return XDCx.mongodb
-}
-
-// APIs returns the RPC descriptors the XDCX implementation offers
-func (XDCx *XDCX) APIs() []rpc.API {
-	return []rpc.API{
-		{
-			Namespace: ProtocolName,
-			Version:   ProtocolVersionStr,
-			Service:   NewPublicXDCXAPI(XDCx),
-			Public:    true,
-		},
-	}
-}
-
-// Version returns the XDCX sub-protocols version number.
-func (XDCx *XDCX) Version() uint64 {
-	return ProtocolVersion
 }
 
 func (XDCx *XDCX) ProcessOrderPending(header *types.Header, coinbase common.Address, chain consensus.ChainContext, pending map[common.Address]types.OrderTransactions, statedb *state.StateDB, XDCXstatedb *tradingstate.TradingStateDB) ([]tradingstate.TxDataMatch, map[common.Hash]tradingstate.MatchingResult) {
@@ -275,11 +216,11 @@ func (XDCx *XDCX) GetAveragePriceLastEpoch(chain consensus.ChainContext, statedb
 		if inversePrice != nil && inversePrice.Sign() > 0 {
 			quoteTokenDecimal, err := XDCx.GetTokenDecimal(chain, statedb, quoteToken)
 			if err != nil || quoteTokenDecimal.Sign() == 0 {
-				return nil, fmt.Errorf("fail to get tokenDecimal. Token: %v . Err: %v", quoteToken.String(), err)
+				return nil, fmt.Errorf("fail to get tokenDecimal: Token: %v . Err: %v", quoteToken.String(), err)
 			}
 			baseTokenDecimal, err := XDCx.GetTokenDecimal(chain, statedb, baseToken)
 			if err != nil || baseTokenDecimal.Sign() == 0 {
-				return nil, fmt.Errorf("fail to get tokenDecimal. Token: %v . Err: %v", baseToken.String(), err)
+				return nil, fmt.Errorf("fail to get tokenDecimal: Token: %v . Err: %v", baseToken.String(), err)
 			}
 			price = new(big.Int).Mul(baseTokenDecimal, quoteTokenDecimal)
 			price = new(big.Int).Div(price, inversePrice)
@@ -302,7 +243,7 @@ func (XDCx *XDCX) ConvertXDCToToken(chain consensus.ChainContext, statedb *state
 
 	tokenDecimal, err := XDCx.GetTokenDecimal(chain, statedb, token)
 	if err != nil || tokenDecimal.Sign() == 0 {
-		return common.Big0, common.Big0, fmt.Errorf("fail to get tokenDecimal. Token: %v . Err: %v", token.String(), err)
+		return common.Big0, common.Big0, fmt.Errorf("fail to get tokenDecimal: Token: %v . Err: %v", token.String(), err)
 	}
 	tokenQuantity := new(big.Int).Mul(quantity, tokenDecimal)
 	tokenQuantity = new(big.Int).Div(tokenQuantity, tokenPriceInXDC)
@@ -568,7 +509,7 @@ func (XDCx *XDCX) GetTradingState(block *types.Block, author common.Address) (*t
 		return nil, err
 	}
 	if XDCx.StateCache == nil {
-		return nil, errors.New("Not initialized XDCx")
+		return nil, errors.New("not initialized XDCx")
 	}
 	return tradingstate.New(root, XDCx.StateCache)
 }
@@ -589,7 +530,7 @@ func (XDCx *XDCX) HasTradingState(block *types.Block, author common.Address) boo
 	return err == nil
 }
 
-func (XDCx *XDCX) GetTriegc() *prque.Prque {
+func (XDCx *XDCX) GetTriegc() *prque.Prque[int64, common.Hash] {
 	return XDCx.Triegc
 }
 
@@ -607,12 +548,9 @@ func (XDCx *XDCX) GetTradingStateRoot(block *types.Block, author common.Address)
 }
 
 func (XDCx *XDCX) UpdateOrderCache(baseToken, quoteToken common.Address, orderHash common.Hash, txhash common.Hash, lastState tradingstate.OrderHistoryItem) {
-	var orderCacheAtTxHash map[common.Hash]tradingstate.OrderHistoryItem
-	c, ok := XDCx.orderCache.Get(txhash)
-	if !ok || c == nil {
+	orderCacheAtTxHash, ok := XDCx.orderCache.Get(txhash)
+	if !ok || orderCacheAtTxHash == nil {
 		orderCacheAtTxHash = make(map[common.Hash]tradingstate.OrderHistoryItem)
-	} else {
-		orderCacheAtTxHash = c.(map[common.Hash]tradingstate.OrderHistoryItem)
 	}
 	orderKey := tradingstate.GetOrderHistoryKey(baseToken, quoteToken, orderHash)
 	_, ok = orderCacheAtTxHash[orderKey]
@@ -629,16 +567,15 @@ func (XDCx *XDCX) RollbackReorgTxMatch(txhash common.Hash) error {
 	items := db.GetListItemByTxHash(txhash, &tradingstate.OrderItem{})
 	if items != nil {
 		for _, order := range items.([]*tradingstate.OrderItem) {
-			c, ok := XDCx.orderCache.Get(txhash)
-			log.Debug("XDCx reorg: rollback order", "txhash", txhash.Hex(), "order", tradingstate.ToJSON(order), "orderHistoryItem", c)
-			if !ok {
+			orderCacheAtTxHash, ok := XDCx.orderCache.Get(txhash)
+			log.Debug("XDCx reorg: rollback order", "txhash", txhash.Hex(), "order", tradingstate.ToJSON(order), "orderHistoryItem", orderCacheAtTxHash)
+			if !ok || orderCacheAtTxHash == nil {
 				log.Debug("XDCx reorg: remove order due to no orderCache", "order", tradingstate.ToJSON(order))
 				if err := db.DeleteObject(order.Hash, &tradingstate.OrderItem{}); err != nil {
 					log.Crit("SDKNode: failed to remove reorg order", "err", err.Error(), "order", tradingstate.ToJSON(order))
 				}
 				continue
 			}
-			orderCacheAtTxHash := c.(map[common.Hash]tradingstate.OrderHistoryItem)
 			orderHistoryItem := orderCacheAtTxHash[tradingstate.GetOrderHistoryKey(order.BaseToken, order.QuoteToken, order.Hash)]
 			if (orderHistoryItem == tradingstate.OrderHistoryItem{}) {
 				log.Debug("XDCx reorg: remove order due to empty orderHistory", "order", tradingstate.ToJSON(order))

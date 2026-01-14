@@ -48,20 +48,16 @@ func getSignerAndSignFn(pk *ecdsa.PrivateKey) (common.Address, func(account acco
 	veryLightScryptN := 2
 	veryLightScryptP := 1
 	dir, _ := os.MkdirTemp("", fmt.Sprintf("eth-getSignerAndSignFn-test-%v", RandStringBytes(5)))
-
-	new := func(kd string) *keystore.KeyStore {
-		return keystore.NewKeyStore(kd, veryLightScryptN, veryLightScryptP)
-	}
-
 	defer os.RemoveAll(dir)
-	ks := new(dir)
+
+	ks := keystore.NewKeyStore(dir, veryLightScryptN, veryLightScryptP)
 	pass := "" // not used but required by API
 	a1, err := ks.ImportECDSA(pk, pass)
 	if err != nil {
-		return common.Address{}, nil, fmt.Errorf(err.Error())
+		return common.Address{}, nil, err
 	}
 	if err := ks.Unlock(a1, ""); err != nil {
-		return a1.Address, nil, fmt.Errorf(err.Error())
+		return a1.Address, nil, err
 	}
 	return a1.Address, ks.SignHash, nil
 }

@@ -21,11 +21,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/consensus/ethash"
 	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
+	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/core/vm"
-
-	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/ethdb"
 	"github.com/XinFinOrg/XDPoSChain/params"
 	"github.com/davecgh/go-spew/spew"
@@ -33,8 +33,8 @@ import (
 
 func TestDefaultGenesisBlock(t *testing.T) {
 	block := DefaultGenesisBlock().ToBlock(nil)
-	if block.Hash() != params.XDCMainnetGenesisHash {
-		t.Errorf("wrong mainnet genesis hash, got %v, want %v", block.Hash().String(), params.XDCMainnetGenesisHash.String())
+	if block.Hash() != params.MainnetGenesisHash {
+		t.Errorf("wrong mainnet genesis hash, got %v, want %v", block.Hash().String(), params.MainnetGenesisHash.String())
 	}
 	block = DefaultTestnetGenesisBlock().ToBlock(nil)
 	if block.Hash() != params.TestnetGenesisHash {
@@ -47,7 +47,7 @@ func TestSetupGenesis(t *testing.T) {
 		customghash = common.HexToHash("0xfc8a143549950b0d3e3e7b70b0067b152e6b903ab5438f1ea87f0448ec93da48")
 		customg     = Genesis{
 			Config: &params.ChainConfig{HomesteadBlock: big.NewInt(3)},
-			Alloc: GenesisAlloc{
+			Alloc: types.GenesisAlloc{
 				{1}: {Balance: big.NewInt(1), Storage: map[common.Hash]common.Hash{{1}: {1}}},
 			},
 		}
@@ -74,7 +74,7 @@ func TestSetupGenesis(t *testing.T) {
 			fn: func(db ethdb.Database) (*params.ChainConfig, common.Hash, error) {
 				return SetupGenesisBlock(db, nil)
 			},
-			wantHash:   params.XDCMainnetGenesisHash,
+			wantHash:   params.MainnetGenesisHash,
 			wantConfig: params.XDCMainnetChainConfig,
 		},
 		{
@@ -83,7 +83,7 @@ func TestSetupGenesis(t *testing.T) {
 				DefaultGenesisBlock().MustCommit(db)
 				return SetupGenesisBlock(db, nil)
 			},
-			wantHash:   params.XDCMainnetGenesisHash,
+			wantHash:   params.MainnetGenesisHash,
 			wantConfig: params.XDCMainnetChainConfig,
 		},
 		{
@@ -156,7 +156,7 @@ func TestSetupGenesis(t *testing.T) {
 			t.Errorf("%s: returned hash %s, want %s", test.name, hash.Hex(), test.wantHash.Hex())
 		} else if err == nil {
 			// Check database content.
-			stored := GetBlock(db, test.wantHash, 0)
+			stored := rawdb.ReadBlock(db, test.wantHash, 0)
 			if stored.Hash() != test.wantHash {
 				t.Errorf("%s: block in DB has hash %s, want %s", test.name, stored.Hash(), test.wantHash)
 			}

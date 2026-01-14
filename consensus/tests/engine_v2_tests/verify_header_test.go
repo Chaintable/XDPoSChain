@@ -25,85 +25,83 @@ func TestShouldVerifyBlock(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, _, signer, signFn, _ := PrepareXDCTestBlockChainForV2Engine(t, 910, &config, nil)
 	adaptor := blockchain.Engine().(*XDPoS.XDPoS)
 
 	// Happy path
 	happyPathHeader := blockchain.GetBlockByNumber(901).Header()
-	err = adaptor.VerifyHeader(blockchain, happyPathHeader, true)
+	err = adaptor.VerifyHeader(blockchain, happyPathHeader, true, true)
 	assert.Nil(t, err)
 
 	// Unhappy path
 
 	// Verify non-epoch switch block
-	err = adaptor.VerifyHeader(blockchain, blockchain.GetBlockByNumber(902).Header(), true)
+	err = adaptor.VerifyHeader(blockchain, blockchain.GetBlockByNumber(902).Header(), true, true)
 	assert.Nil(t, err)
 
 	nonEpochSwitchWithValidators := blockchain.GetBlockByNumber(902).Header()
 	nonEpochSwitchWithValidators.Validators = acc1Addr.Bytes()
-	err = adaptor.VerifyHeader(blockchain, nonEpochSwitchWithValidators, true)
+	err = adaptor.VerifyHeader(blockchain, nonEpochSwitchWithValidators, true, true)
 	assert.Equal(t, utils.ErrInvalidFieldInNonEpochSwitch, err)
 
 	noValidatorBlock := blockchain.GetBlockByNumber(902).Header()
 	noValidatorBlock.Validator = []byte{}
-	err = adaptor.VerifyHeader(blockchain, noValidatorBlock, true)
+	err = adaptor.VerifyHeader(blockchain, noValidatorBlock, true, true)
 	assert.Equal(t, consensus.ErrNoValidatorSignatureV2, err)
 
 	blockFromFuture := blockchain.GetBlockByNumber(902).Header()
 	blockFromFuture.Time = big.NewInt(time.Now().Unix() + 10000)
-	err = adaptor.VerifyHeader(blockchain, blockFromFuture, true)
+	err = adaptor.VerifyHeader(blockchain, blockFromFuture, true, true)
 	assert.Equal(t, consensus.ErrFutureBlock, err)
 
 	invalidQcBlock := blockchain.GetBlockByNumber(902).Header()
 	invalidQcBlock.Extra = []byte{2}
-	err = adaptor.VerifyHeader(blockchain, invalidQcBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidQcBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidV2Extra, err)
 
 	// Epoch switch
 	invalidAuthNonceBlock := blockchain.GetBlockByNumber(901).Header()
 	invalidAuthNonceBlock.Nonce = types.BlockNonce{123}
-	err = adaptor.VerifyHeader(blockchain, invalidAuthNonceBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidAuthNonceBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidVote, err)
 
 	emptyValidatorsBlock := blockchain.GetBlockByNumber(901).Header()
 	emptyValidatorsBlock.Validators = []byte{}
-	err = adaptor.VerifyHeader(blockchain, emptyValidatorsBlock, true)
+	err = adaptor.VerifyHeader(blockchain, emptyValidatorsBlock, true, true)
 	assert.Equal(t, utils.ErrEmptyEpochSwitchValidators, err)
 
 	invalidValidatorsSignerBlock := blockchain.GetBlockByNumber(901).Header()
 	invalidValidatorsSignerBlock.Validators = []byte{123}
-	err = adaptor.VerifyHeader(blockchain, invalidValidatorsSignerBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidValidatorsSignerBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidCheckpointSigners, err)
 
 	// non-epoch switch
 	invalidValidatorsExistBlock := blockchain.GetBlockByNumber(902).Header()
 	invalidValidatorsExistBlock.Validators = []byte{123}
-	err = adaptor.VerifyHeader(blockchain, invalidValidatorsExistBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidValidatorsExistBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidFieldInNonEpochSwitch, err)
 
 	invalidPenaltiesExistBlock := blockchain.GetBlockByNumber(902).Header()
 	invalidPenaltiesExistBlock.Penalties = common.Hex2BytesFixed("123131231", 20)
-	err = adaptor.VerifyHeader(blockchain, invalidPenaltiesExistBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidPenaltiesExistBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidFieldInNonEpochSwitch, err)
 
 	merkleRoot := "35999dded35e8db12de7e6c1471eb9670c162eec616ecebbaf4fddd4676fb123"
 	parentNotExistBlock := blockchain.GetBlockByNumber(901).Header()
 	parentNotExistBlock.ParentHash = common.HexToHash(merkleRoot)
-	err = adaptor.VerifyHeader(blockchain, parentNotExistBlock, true)
+	err = adaptor.VerifyHeader(blockchain, parentNotExistBlock, true, true)
 	assert.Equal(t, consensus.ErrUnknownAncestor, err)
 
 	block901 := blockchain.GetBlockByNumber(901).Header()
 	tooFastMinedBlock := blockchain.GetBlockByNumber(902).Header()
 	tooFastMinedBlock.Time = big.NewInt(block901.Time.Int64() - 10)
-	err = adaptor.VerifyHeader(blockchain, tooFastMinedBlock, true)
+	err = adaptor.VerifyHeader(blockchain, tooFastMinedBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidTimestamp, err)
 
 	invalidDifficultyBlock := blockchain.GetBlockByNumber(902).Header()
 	invalidDifficultyBlock.Difficulty = big.NewInt(2)
-	err = adaptor.VerifyHeader(blockchain, invalidDifficultyBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidDifficultyBlock, true, true)
 	assert.Equal(t, utils.ErrInvalidDifficulty, err)
 
 	// Create an invalid QC round
@@ -119,7 +117,7 @@ func TestShouldVerifyBlock(t *testing.T) {
 	// Genrate QC
 	signedHash, err := signFn(accounts.Account{Address: signer}, types.VoteSigHash(voteForSign).Bytes())
 	if err != nil {
-		panic(fmt.Errorf("Error generate QC by creating signedHash: %v", err))
+		panic(fmt.Errorf("error generate QC by creating signedHash: %v", err))
 	}
 	// Sign from acc 1, 2, 3
 	acc1SignedHash := SignHashByPK(acc1Key, types.VoteSigHash(voteForSign).Bytes())
@@ -139,12 +137,12 @@ func TestShouldVerifyBlock(t *testing.T) {
 	}
 	extraInBytes, err := extra.EncodeToBytes()
 	if err != nil {
-		panic(fmt.Errorf("Error encode extra into bytes: %v", err))
+		panic(fmt.Errorf("error encode extra into bytes: %v", err))
 	}
 
 	invalidRoundBlock := blockchain.GetBlockByNumber(902).Header()
 	invalidRoundBlock.Extra = extraInBytes
-	err = adaptor.VerifyHeader(blockchain, invalidRoundBlock, true)
+	err = adaptor.VerifyHeader(blockchain, invalidRoundBlock, true, true)
 	assert.Equal(t, utils.ErrRoundInvalid, err)
 
 	// Not valid validator
@@ -152,19 +150,19 @@ func TestShouldVerifyBlock(t *testing.T) {
 	notQualifiedSigner, notQualifiedSignFn, err := getSignerAndSignFn(voterKey)
 	assert.Nil(t, err)
 	sealHeader(blockchain, coinbaseValidatorMismatchBlock, notQualifiedSigner, notQualifiedSignFn)
-	err = adaptor.VerifyHeader(blockchain, coinbaseValidatorMismatchBlock, true)
+	err = adaptor.VerifyHeader(blockchain, coinbaseValidatorMismatchBlock, true, true)
 	assert.Equal(t, utils.ErrCoinbaseAndValidatorMismatch, err)
 
 	// Make the validators not legit by adding something to the validator
 	validatorsNotLegit := blockchain.GetBlockByNumber(901).Header()
 	validatorsNotLegit.Validators = append(validatorsNotLegit.Validators, acc1Addr[:]...)
-	err = adaptor.VerifyHeader(blockchain, validatorsNotLegit, true)
+	err = adaptor.VerifyHeader(blockchain, validatorsNotLegit, true, true)
 	assert.Equal(t, utils.ErrValidatorsNotLegit, err)
 
 	// Make the penalties not legit by adding something to the penalty
 	penaltiesNotLegit := blockchain.GetBlockByNumber(901).Header()
 	penaltiesNotLegit.Penalties = append(penaltiesNotLegit.Penalties, acc1Addr[:]...)
-	err = adaptor.VerifyHeader(blockchain, penaltiesNotLegit, true)
+	err = adaptor.VerifyHeader(blockchain, penaltiesNotLegit, true, true)
 	assert.Equal(t, utils.ErrPenaltiesNotLegit, err)
 }
 
@@ -176,8 +174,6 @@ func TestConfigSwitchOnDifferentCertThreshold(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, _, _, _, _ := PrepareXDCTestBlockChainForV2Engine(t, 915, &config, nil)
 
@@ -215,7 +211,7 @@ func TestConfigSwitchOnDifferentCertThreshold(t *testing.T) {
 	// after 910 require 4 signs, but we only give 3 signs
 	block912 := blockchain.GetBlockByNumber(912).Header()
 	block912.Extra = extraInBytes
-	err = adaptor.VerifyHeader(blockchain, block912, true)
+	err = adaptor.VerifyHeader(blockchain, block912, true, true)
 
 	assert.Equal(t, utils.ErrInvalidQCSignatures, err)
 
@@ -254,7 +250,7 @@ func TestConfigSwitchOnDifferentCertThreshold(t *testing.T) {
 	// QC contains 910, so it requires 3 signatures, not use block number to determine which config to use
 	block911 := blockchain.GetBlockByNumber(911).Header()
 	block911.Extra = extraInBytes
-	err = adaptor.VerifyHeader(blockchain, block911, true)
+	err = adaptor.VerifyHeader(blockchain, block911, true, true)
 
 	// error ErrValidatorNotWithinMasternodes means verifyQC is passed and move to next verification process
 	assert.Equal(t, utils.ErrValidatorNotWithinMasternodes, err)
@@ -274,8 +270,6 @@ func TestConfigSwitchOnDifferentMasternodeCount(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, currentBlock, _, _, _ := PrepareXDCTestBlockChainForV2Engine(t, int(config.XDPoS.Epoch)*2, &config, nil)
 	adaptor := blockchain.Engine().(*XDPoS.XDPoS)
@@ -298,7 +292,7 @@ func TestConfigSwitchOnDifferentMasternodeCount(t *testing.T) {
 
 	adaptor.EngineV2.SetNewRoundFaker(blockchain, 899, false)
 
-	err = adaptor.VerifyHeader(blockchain, header1800, true)
+	err = adaptor.VerifyHeader(blockchain, header1800, true, true)
 
 	// error ErrValidatorNotWithinMasternodes means verifyQC is passed and move to next verification process
 	assert.Equal(t, utils.ErrValidatorNotWithinMasternodes, err)
@@ -312,8 +306,6 @@ func TestConfigSwitchOnDifferentMindPeriod(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, _, _, _, _ := PrepareXDCTestBlockChainForV2Engine(t, 915, &config, nil)
 
@@ -352,7 +344,7 @@ func TestConfigSwitchOnDifferentMindPeriod(t *testing.T) {
 	block911 := blockchain.GetBlockByNumber(911).Header()
 	block911.Extra = extraInBytes
 	block911.Time = big.NewInt(blockchain.GetBlockByNumber(910).Time().Int64() + 2) //2 is previous config, should get the right config from round
-	err = adaptor.VerifyHeader(blockchain, block911, true)
+	err = adaptor.VerifyHeader(blockchain, block911, true, true)
 
 	assert.Equal(t, utils.ErrInvalidTimestamp, err)
 }
@@ -365,8 +357,6 @@ func TestShouldFailIfNotEnoughQCSignatures(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, currentBlock, signer, signFn, _ := PrepareXDCTestBlockChainForV2Engine(t, 902, &config, nil)
 	adaptor := blockchain.Engine().(*XDPoS.XDPoS)
@@ -398,12 +388,12 @@ func TestShouldFailIfNotEnoughQCSignatures(t *testing.T) {
 	}
 	extraInBytes, err := extra.EncodeToBytes()
 	if err != nil {
-		panic(fmt.Errorf("Error encode extra into bytes: %v", err))
+		panic(fmt.Errorf("error encode extra into bytes: %v", err))
 	}
 	headerWithDuplicatedSignatures := currentBlock.Header()
 	headerWithDuplicatedSignatures.Extra = extraInBytes
 	// Happy path
-	err = adaptor.VerifyHeader(blockchain, headerWithDuplicatedSignatures, true)
+	err = adaptor.VerifyHeader(blockchain, headerWithDuplicatedSignatures, true, true)
 	assert.Equal(t, utils.ErrInvalidQCSignatures, err)
 
 }
@@ -416,8 +406,6 @@ func TestShouldVerifyHeaders(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, _, _, _, _ := PrepareXDCTestBlockChainForV2Engine(t, 910, &config, nil)
 	adaptor := blockchain.Engine().(*XDPoS.XDPoS)
@@ -455,8 +443,6 @@ func TestShouldVerifyHeadersEvenIfParentsNotYetWrittenIntoDB(t *testing.T) {
 	var config params.ChainConfig
 	err = json.Unmarshal([]byte(configString), &config)
 	assert.Nil(t, err)
-	// Enable verify
-	config.XDPoS.V2.SkipV2Validation = false
 	// Block 901 is the first v2 block with round of 1
 	blockchain, _, block910, signer, signFn, _ := PrepareXDCTestBlockChainForV2Engine(t, 910, &config, nil)
 	adaptor := blockchain.Engine().(*XDPoS.XDPoS)

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/XinFinOrg/XDPoSChain/common"
@@ -50,7 +51,11 @@ const (
 	frameWriteTimeout = 20 * time.Second
 )
 
-var errServerStopped = errors.New("server stopped")
+var (
+	errServerStopped       = errors.New("server stopped")
+	errEncHandshakeError   = errors.New("rlpx enc error")
+	errProtoHandshakeError = errors.New("rlpx proto error")
+)
 
 // Config holds Server options.
 type Config struct {
@@ -75,12 +80,11 @@ type Config struct {
 	// Disabling is useful for protocol debugging (manual topology).
 	NoDiscovery bool
 
-	// DiscoveryV5 specifies whether the the new topic-discovery based V5 discovery
+	// DiscoveryV5 specifies whether the new topic-discovery based V5 discovery
 	// protocol should be started or not.
 	DiscoveryV5 bool `toml:",omitempty"`
 
 	// Name sets the node name of this server.
-	// Use common.MakeName to create a name that follows existing conventions.
 	Name string `toml:"-"`
 
 	// BootstrapNodes are used to establish connectivity
@@ -153,7 +157,7 @@ type Server struct {
 	newPeerHook  func(*Peer)
 
 	lock    sync.Mutex // protects running
-	running bool
+	Running bool
 
 	ntab         discoverTable
 	listener     net.Listener
@@ -168,6 +172,8 @@ type Server struct {
 	quit          chan struct{}
 	addstatic     chan *discover.Node
 	removestatic  chan *discover.Node
+	addtrusted    chan *discover.Node
+	removetrusted chan *discover.Node
 	posthandshake chan *conn
 	addpeer       chan *conn
 	delpeer       chan peerDrop
@@ -184,7 +190,7 @@ type peerDrop struct {
 	requested bool // true if signaled by the peer
 }
 
-type connFlag int
+type connFlag int32
 
 const (
 	dynDialedConn connFlag = 1 << iota
@@ -249,7 +255,18 @@ func (f connFlag) String() string {
 }
 
 func (c *conn) is(f connFlag) bool {
-	return c.flags&f != 0
+	flags := connFlag(atomic.LoadInt32((*int32)(&c.flags)))
+	return flags&f != 0
+}
+
+func (c *conn) set(f connFlag, val bool) {
+	flags := connFlag(atomic.LoadInt32((*int32)(&c.flags)))
+	if val {
+		flags |= f
+	} else {
+		flags &= ^f
+	}
+	atomic.StoreInt32((*int32)(&c.flags), int32(flags))
 }
 
 // Peers returns all connected peers.
@@ -300,6 +317,23 @@ func (srv *Server) RemovePeer(node *discover.Node) {
 	}
 }
 
+// AddTrustedPeer adds the given node to a reserved whitelist which allows the
+// node to always connect, even if the slot are full.
+func (srv *Server) AddTrustedPeer(node *discover.Node) {
+	select {
+	case srv.addtrusted <- node:
+	case <-srv.quit:
+	}
+}
+
+// RemoveTrustedPeer removes the given node from the trusted peer set.
+func (srv *Server) RemoveTrustedPeer(node *discover.Node) {
+	select {
+	case srv.removetrusted <- node:
+	case <-srv.quit:
+	}
+}
+
 // SubscribePeers subscribes the given channel to peer events
 func (srv *Server) SubscribeEvents(ch chan *PeerEvent) event.Subscription {
 	return srv.peerFeed.Subscribe(ch)
@@ -310,7 +344,7 @@ func (srv *Server) Self() *discover.Node {
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
 
-	if !srv.running {
+	if !srv.Running {
 		return &discover.Node{IP: net.ParseIP("0.0.0.0")}
 	}
 	return srv.makeSelf(srv.listener, srv.ntab)
@@ -341,10 +375,10 @@ func (srv *Server) makeSelf(listener net.Listener, ntab discoverTable) *discover
 func (srv *Server) Stop() {
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
-	if !srv.running {
+	if !srv.Running {
 		return
 	}
-	srv.running = false
+	srv.Running = false
 	if srv.listener != nil {
 		// this unblocks listener Accept
 		srv.listener.Close()
@@ -364,7 +398,7 @@ type sharedUDPConn struct {
 func (s *sharedUDPConn) ReadFromUDP(b []byte) (n int, addr *net.UDPAddr, err error) {
 	packet, ok := <-s.unhandled
 	if !ok {
-		return 0, nil, errors.New("Connection was closed")
+		return 0, nil, errors.New("connection was closed")
 	}
 	l := len(packet.Data)
 	if l > len(b) {
@@ -384,10 +418,10 @@ func (s *sharedUDPConn) Close() error {
 func (srv *Server) Start() (err error) {
 	srv.lock.Lock()
 	defer srv.lock.Unlock()
-	if srv.running {
+	if srv.Running {
 		return errors.New("server already running")
 	}
-	srv.running = true
+	srv.Running = true
 	srv.log = srv.Config.Logger
 	if srv.log == nil {
 		srv.log = log.New()
@@ -410,6 +444,8 @@ func (srv *Server) Start() (err error) {
 	srv.posthandshake = make(chan *conn)
 	srv.addstatic = make(chan *discover.Node)
 	srv.removestatic = make(chan *discover.Node)
+	srv.addtrusted = make(chan *discover.Node)
+	srv.removetrusted = make(chan *discover.Node)
 	srv.peerOp = make(chan peerOpFunc)
 	srv.peerOpDone = make(chan struct{})
 
@@ -502,7 +538,7 @@ func (srv *Server) Start() (err error) {
 
 	srv.loopWG.Add(1)
 	go srv.run(dialer)
-	srv.running = true
+	srv.Running = true
 	return nil
 }
 
@@ -546,8 +582,7 @@ func (srv *Server) run(dialstate dialer) {
 		queuedTasks  []task // tasks that can't run yet
 	)
 	// Put trusted nodes into a map to speed up checks.
-	// Trusted peers are loaded on startup and cannot be
-	// modified while the server is running.
+	// Trusted peers are loaded on startup or added via AddTrustedPeer RPC.
 	for _, n := range srv.TrustedNodes {
 		trusted[n.ID] = true
 	}
@@ -599,11 +634,29 @@ running:
 		case n := <-srv.removestatic:
 			// This channel is used by RemovePeer to send a
 			// disconnect request to a peer and begin the
-			// stop keeping the node connected
+			// stop keeping the node connected.
 			srv.log.Debug("Removing static node", "node", n)
 			dialstate.removeStatic(n)
 			if p, ok := peers[n.ID]; ok {
 				p.Disconnect(DiscRequested)
+			}
+		case n := <-srv.addtrusted:
+			// This channel is used by AddTrustedPeer to add an enode
+			// to the trusted node set.
+			srv.log.Trace("Adding trusted node", "node", n)
+			trusted[n.ID] = true
+			// Mark any already-connected peer as trusted
+			if p, ok := peers[n.ID]; ok {
+				p.rw.set(trustedConn, true)
+			}
+		case n := <-srv.removetrusted:
+			// This channel is used by RemoveTrustedPeer to remove an enode
+			// from the trusted node set.
+			srv.log.Trace("Removing trusted node", "node", n)
+			delete(trusted, n.ID)
+			// Unmark any already-connected peer as trusted
+			if p, ok := peers[n.ID]; ok {
+				p.rw.set(trustedConn, false)
 			}
 		case op := <-srv.peerOp:
 			// This channel is used by Peers and PeerCount.
@@ -653,7 +706,11 @@ running:
 				}
 				if p.Inbound() {
 					inboundCount++
+					serveSuccessMeter.Mark(1)
+				} else {
+					dialSuccessMeter.Mark(1)
 				}
+				activePeerGauge.Inc(1)
 			}
 			// The dialer logic relies on the assumption that
 			// dial tasks complete after the peer has been added or
@@ -671,6 +728,7 @@ running:
 			if pd.Inbound() {
 				inboundCount--
 			}
+			activePeerGauge.Dec(1)
 		}
 	}
 
@@ -790,7 +848,8 @@ func (srv *Server) listenLoop() {
 			}
 		}
 
-		fd = newMeteredConn(fd, true)
+		fd = newMeteredConn(fd)
+		serveMeter.Mark(1)
 		srv.log.Trace("Accepted connection", "addr", fd.RemoteAddr())
 		go func() {
 			srv.SetupConn(fd, inboundConn, nil)
@@ -810,6 +869,9 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *discover.Nod
 	c := &conn{fd: fd, transport: srv.newTransport(fd), flags: flags, cont: make(chan error)}
 	err := srv.setupConn(c, flags, dialDest)
 	if err != nil {
+		if !c.is(inboundConn) {
+			markDialError(err)
+		}
 		c.close(err)
 		srv.log.Trace("Setting up connection failed", "id", c.id, "err", err)
 	}
@@ -819,7 +881,7 @@ func (srv *Server) SetupConn(fd net.Conn, flags connFlag, dialDest *discover.Nod
 func (srv *Server) setupConn(c *conn, flags connFlag, dialDest *discover.Node) error {
 	// Prevent leftover pending conns from entering the handshake.
 	srv.lock.Lock()
-	running := srv.running
+	running := srv.Running
 	srv.lock.Unlock()
 	if !running {
 		return errServerStopped

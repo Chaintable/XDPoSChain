@@ -56,7 +56,7 @@ func TestYourTurnInitialV2(t *testing.T) {
 	assert.NotNil(t, snap)
 	masterNodes := adaptor.EngineV1.GetMasternodesFromCheckpointHeader(block900.Header())
 	for i := 0; i < len(masterNodes); i++ {
-		assert.Equal(t, masterNodes[i].Hex(), snap.NextEpochCandidates[i].Hex())
+		assert.Equal(t, masterNodes[i], snap.NextEpochCandidates[i])
 	}
 }
 
@@ -150,7 +150,7 @@ func TestPrepareFail(t *testing.T) {
 	notReadyToProposeHeader := &types.Header{
 		ParentHash: currentBlock.Hash(),
 		Number:     big.NewInt(int64(901)),
-		GasLimit:   params.TargetGasLimit,
+		GasLimit:   params.V2TestsGasLimit,
 		Time:       big.NewInt(tstamp),
 		Coinbase:   signer,
 	}
@@ -161,7 +161,7 @@ func TestPrepareFail(t *testing.T) {
 	notReadyToMine := &types.Header{
 		ParentHash: currentBlock.Hash(),
 		Number:     big.NewInt(int64(901)),
-		GasLimit:   params.TargetGasLimit,
+		GasLimit:   params.V2TestsGasLimit,
 		Time:       big.NewInt(tstamp),
 		Coinbase:   signer,
 	}
@@ -175,7 +175,7 @@ func TestPrepareFail(t *testing.T) {
 	header901WithoutCoinbase := &types.Header{
 		ParentHash: currentBlock.Hash(),
 		Number:     big.NewInt(int64(901)),
-		GasLimit:   params.TargetGasLimit,
+		GasLimit:   params.V2TestsGasLimit,
 		Time:       big.NewInt(tstamp),
 	}
 
@@ -196,7 +196,7 @@ func TestPrepareHappyPath(t *testing.T) {
 	header901 := &types.Header{
 		ParentHash: currentBlock.Hash(),
 		Number:     big.NewInt(int64(901)),
-		GasLimit:   params.TargetGasLimit,
+		GasLimit:   params.V2TestsGasLimit,
 		Time:       big.NewInt(tstamp),
 		Coinbase:   signer,
 	}
@@ -276,7 +276,7 @@ func TestUpdateMultipleMasterNodes(t *testing.T) {
 	header1800 := &types.Header{
 		ParentHash: parentBlock.Hash(),
 		Number:     big.NewInt(int64(1800)),
-		GasLimit:   params.TargetGasLimit,
+		GasLimit:   params.V2TestsGasLimit,
 		Time:       big.NewInt(tstamp),
 		Coinbase:   voterAddr,
 	}

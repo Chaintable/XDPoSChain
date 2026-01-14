@@ -30,6 +30,7 @@ import (
 
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/core"
+	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/ethdb"
@@ -73,7 +74,7 @@ func StartNode(stack *node.Node) {
 		defer signal.Stop(sigc)
 		<-sigc
 		log.Info("Got interrupt, shutting down...")
-		go stack.Stop()
+		go stack.Close()
 		for i := 10; i > 0; i-- {
 			<-sigc
 			if i > 1 {
@@ -272,15 +273,13 @@ func ImportPreimages(db ethdb.Database, fn string) error {
 		// Accumulate the preimages and flush when enough ws gathered
 		preimages[crypto.Keccak256Hash(blob)] = common.CopyBytes(blob)
 		if len(preimages) > 1024 {
-			if err := core.WritePreimages(db, 0, preimages); err != nil {
-				return err
-			}
+			rawdb.WritePreimages(db, preimages)
 			preimages = make(map[common.Hash][]byte)
 		}
 	}
 	// Flush the last batch preimage data
 	if len(preimages) > 0 {
-		return core.WritePreimages(db, 0, preimages)
+		rawdb.WritePreimages(db, preimages)
 	}
 	return nil
 }
@@ -304,6 +303,8 @@ func ExportPreimages(db ethdb.Database, fn string) error {
 	}
 	// Iterate over the preimages and export them
 	it := db.NewIterator([]byte("secure-key-"), nil)
+	defer it.Release()
+
 	for it.Next() {
 		if err := rlp.Encode(writer, it.Value()); err != nil {
 			return err

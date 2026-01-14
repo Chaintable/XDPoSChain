@@ -28,11 +28,10 @@ import (
 	"testing"
 	"testing/quick"
 
-	check "gopkg.in/check.v1"
-
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
+	check "gopkg.in/check.v1"
 )
 
 // Tests that updating a state trie does not leak any database writes prior to
@@ -40,7 +39,7 @@ import (
 func TestUpdateLeaks(t *testing.T) {
 	// Create an empty state database
 	db := rawdb.NewMemoryDatabase()
-	state, _ := New(common.Hash{}, NewDatabase(db))
+	state, _ := New(types.EmptyRootHash, NewDatabase(db))
 
 	// Update it with some accounts
 	for i := byte(0); i < 255; i++ {
@@ -58,10 +57,9 @@ func TestUpdateLeaks(t *testing.T) {
 	// Ensure that no data was leaked into the database
 	it := db.NewIterator(nil, nil)
 	for it.Next() {
-		key := it.Key()
-		value := it.Value()
-		t.Errorf("State leaked into database: %x -> %x", key, value)
+		t.Errorf("State leaked into database: %x -> %x", it.Key(), it.Value())
 	}
+	it.Release()
 }
 
 // Tests that no intermediate state of an object is stored into the database,
@@ -70,8 +68,8 @@ func TestIntermediateLeaks(t *testing.T) {
 	// Create two state databases, one transitioning to the final state, the other final from the beginning
 	transDb := rawdb.NewMemoryDatabase()
 	finalDb := rawdb.NewMemoryDatabase()
-	transState, _ := New(common.Hash{}, NewDatabase(transDb))
-	finalState, _ := New(common.Hash{}, NewDatabase(finalDb))
+	transState, _ := New(types.EmptyRootHash, NewDatabase(transDb))
+	finalState, _ := New(types.EmptyRootHash, NewDatabase(finalDb))
 
 	modify := func(state *StateDB, addr common.Address, i, tweak byte) {
 		state.SetBalance(addr, big.NewInt(int64(11*i)+int64(tweak)))
@@ -109,16 +107,16 @@ func TestIntermediateLeaks(t *testing.T) {
 	for it.Next() {
 		key := it.Key()
 		if _, err := transDb.Get(key); err != nil {
-			val, _ := finalDb.Get(key)
-			t.Errorf("entry missing from the transition database: %x -> %x", key, val)
+			t.Errorf("entry missing from the transition database: %x -> %x", key, it.Value())
 		}
 	}
+	it.Release()
+
 	it = transDb.NewIterator(nil, nil)
 	for it.Next() {
 		key := it.Key()
 		if _, err := finalDb.Get(key); err != nil {
-			val, _ := transDb.Get(key)
-			t.Errorf("extra entry in the transition database: %x -> %x", key, val)
+			t.Errorf("extra entry in the transition database: %x -> %x", key, it.Value())
 		}
 	}
 }
@@ -129,7 +127,7 @@ func TestIntermediateLeaks(t *testing.T) {
 func TestCopy(t *testing.T) {
 	// Create a random state test to copy and modify "independently"
 	db := rawdb.NewMemoryDatabase()
-	orig, _ := New(common.Hash{}, NewDatabase(db))
+	orig, _ := New(types.EmptyRootHash, NewDatabase(db))
 
 	for i := byte(0); i < 255; i++ {
 		obj := orig.GetOrNewStateObject(common.BytesToAddress([]byte{i}))
@@ -261,9 +259,9 @@ func newTestAction(addr common.Address, r *rand.Rand) testAction {
 			},
 		},
 		{
-			name: "Suicide",
+			name: "SelfDestruct",
 			fn: func(a testAction, s *StateDB) {
-				s.Suicide(addr)
+				s.SelfDestruct(addr)
 			},
 		},
 		{
@@ -297,9 +295,19 @@ func newTestAction(addr common.Address, r *rand.Rand) testAction {
 			},
 			args: make([]int64, 1),
 		},
+		{
+			name: "SetTransientState",
+			fn: func(a testAction, s *StateDB) {
+				var key, val common.Hash
+				binary.BigEndian.PutUint16(key[:], uint16(a.args[0]))
+				binary.BigEndian.PutUint16(val[:], uint16(a.args[1]))
+				s.SetTransientState(addr, key, val)
+			},
+			args: make([]int64, 2),
+		},
 	}
 	action := actions[r.Intn(len(actions))]
-	var nameargs []string
+	nameargs := make([]string, 0, 1+len(action.args))
 	if !action.noAddr {
 		nameargs = append(nameargs, addr.Hex())
 	}
@@ -355,7 +363,7 @@ func (test *snapshotTest) run() bool {
 	// Run all actions and create snapshots.
 	var (
 		db           = rawdb.NewMemoryDatabase()
-		state, _     = New(common.Hash{}, NewDatabase(db))
+		state, _     = New(types.EmptyRootHash, NewDatabase(db))
 		snapshotRevs = make([]int, len(test.snapshots))
 		sindex       = 0
 	)
@@ -369,7 +377,7 @@ func (test *snapshotTest) run() bool {
 	// Revert all snapshots in reverse order. Each revert must yield a state
 	// that is equivalent to fresh state with all actions up the snapshot applied.
 	for sindex--; sindex >= 0; sindex-- {
-		checkstate, _ := New(common.Hash{}, state.Database())
+		checkstate, _ := New(types.EmptyRootHash, state.Database())
 		for _, action := range test.actions[:test.snapshots[sindex]] {
 			action.fn(action, checkstate)
 		}
@@ -395,7 +403,7 @@ func (test *snapshotTest) checkEqual(state, checkstate *StateDB) error {
 		}
 		// Check basic accessor methods.
 		checkeq("Exist", state.Exist(addr), checkstate.Exist(addr))
-		checkeq("HasSuicided", state.HasSuicided(addr), checkstate.HasSuicided(addr))
+		checkeq("HasSelfDestructed", state.HasSelfDestructed(addr), checkstate.HasSelfDestructed(addr))
 		checkeq("GetBalance", state.GetBalance(addr), checkstate.GetBalance(addr))
 		checkeq("GetNonce", state.GetNonce(addr), checkstate.GetNonce(addr))
 		checkeq("GetCode", state.GetCode(addr), checkstate.GetCode(addr))
@@ -403,11 +411,11 @@ func (test *snapshotTest) checkEqual(state, checkstate *StateDB) error {
 		checkeq("GetCodeSize", state.GetCodeSize(addr), checkstate.GetCodeSize(addr))
 		// Check storage.
 		if obj := state.getStateObject(addr); obj != nil {
-			state.ForEachStorage(addr, func(key, val common.Hash) bool {
-				return checkeq("GetState("+key.Hex()+")", val, checkstate.GetState(addr, key))
+			state.ForEachStorage(addr, func(key, value common.Hash) bool {
+				return checkeq("GetState("+key.Hex()+")", checkstate.GetState(addr, key), value)
 			})
-			checkstate.ForEachStorage(addr, func(key, checkval common.Hash) bool {
-				return checkeq("GetState("+key.Hex()+")", state.GetState(addr, key), checkval)
+			checkstate.ForEachStorage(addr, func(key, value common.Hash) bool {
+				return checkeq("GetState("+key.Hex()+")", checkstate.GetState(addr, key), value)
 			})
 		}
 		if err != nil {
@@ -419,9 +427,9 @@ func (test *snapshotTest) checkEqual(state, checkstate *StateDB) error {
 		return fmt.Errorf("got GetRefund() == %d, want GetRefund() == %d",
 			state.GetRefund(), checkstate.GetRefund())
 	}
-	if !reflect.DeepEqual(state.GetLogs(common.Hash{}), checkstate.GetLogs(common.Hash{})) {
+	if !reflect.DeepEqual(state.GetLogs(common.Hash{}, common.Hash{}), checkstate.GetLogs(common.Hash{}, common.Hash{})) {
 		return fmt.Errorf("got GetLogs(common.Hash{}) == %v, want GetLogs(common.Hash{}) == %v",
-			state.GetLogs(common.Hash{}), checkstate.GetLogs(common.Hash{}))
+			state.GetLogs(common.Hash{}, common.Hash{}), checkstate.GetLogs(common.Hash{}, common.Hash{}))
 	}
 	return nil
 }
@@ -453,7 +461,7 @@ func TestStateDBAccessList(t *testing.T) {
 
 	memDb := rawdb.NewMemoryDatabase()
 	db := NewDatabase(memDb)
-	state, _ := New(common.Hash{}, db)
+	state, _ := New(types.EmptyRootHash, db)
 	state.accessList = newAccessList()
 
 	verifyAddrs := func(astrings ...string) {
@@ -613,5 +621,74 @@ func TestStateDBAccessList(t *testing.T) {
 	}
 	if got, exp := len(state.accessList.slots), 1; got != exp {
 		t.Fatalf("expected empty, got %d", got)
+	}
+}
+
+func TestStateDBTransientStorage(t *testing.T) {
+	memDb := rawdb.NewMemoryDatabase()
+	db := NewDatabase(memDb)
+	state, _ := New(types.EmptyRootHash, db)
+
+	key := common.Hash{0x01}
+	value := common.Hash{0x02}
+	addr := common.Address{}
+
+	state.SetTransientState(addr, key, value)
+	if exp, got := 1, state.journal.length(); exp != got {
+		t.Fatalf("journal length mismatch: have %d, want %d", got, exp)
+	}
+	// the retrieved value should equal what was set
+	if got := state.GetTransientState(addr, key); got != value {
+		t.Fatalf("transient storage mismatch: have %x, want %x", got, value)
+	}
+
+	// revert the transient state being set and then check that the
+	// value is now the empty hash
+	state.journal[0].undo(state)
+	if got, exp := state.GetTransientState(addr, key), (common.Hash{}); exp != got {
+		t.Fatalf("transient storage mismatch: have %x, want %x", got, exp)
+	}
+
+	// set transient state and then copy the statedb and ensure that
+	// the transient state is copied
+	state.SetTransientState(addr, key, value)
+	cpy := state.Copy()
+	if got := cpy.GetTransientState(addr, key); got != value {
+		t.Fatalf("transient storage mismatch: have %x, want %x", got, value)
+	}
+}
+
+// TestDeleteCreateRevert tests a weird state transition corner case that we hit
+// while changing the internals of statedb. The workflow is that a contract is
+// self destructed, then in a followup transaction (but same block) it's created
+// again and the transaction reverted.
+//
+// The original statedb implementation flushed dirty objects to the tries after
+// each transaction, so this works ok. The rework accumulated writes in memory
+// first, but the journal wiped the entire state object on create-revert.
+func TestDeleteCreateRevert(t *testing.T) {
+	// Create an initial state with a single contract
+	state, _ := New(common.Hash{}, NewDatabase(rawdb.NewMemoryDatabase()))
+
+	addr := toAddr([]byte("so"))
+	state.SetBalance(addr, big.NewInt(1))
+
+	root, _ := state.Commit(false)
+	state.Reset(root)
+
+	// Simulate self-destructing in one transaction, then create-reverting in another
+	state.SelfDestruct(addr)
+	state.Finalise(true)
+
+	id := state.Snapshot()
+	state.SetBalance(addr, big.NewInt(2))
+	state.RevertToSnapshot(id)
+
+	// Commit the entire state and make sure we don't crash and have the correct state
+	root, _ = state.Commit(true)
+	state.Reset(root)
+
+	if state.getStateObject(addr) != nil {
+		t.Fatalf("self-destructed contract came alive")
 	}
 }

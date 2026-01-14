@@ -44,13 +44,9 @@ const bigIntegerJS = `var bigInt=function(undefined){"use strict";var BASE=1e7,L
 // If those are duktape stack items, popping them off **will** make the slice
 // contents change.
 func makeSlice(ptr unsafe.Pointer, size uint) []byte {
-	var sl = struct {
-		addr uintptr
-		len  int
-		cap  int
-	}{uintptr(ptr), int(size), int(size)}
-
-	return *(*[]byte)(unsafe.Pointer(&sl))
+	// This is the preferred, officially supported, and safer way
+	// to create a slice from a raw pointer in modern Go versions.
+	return unsafe.Slice((*byte)(ptr), int(size))
 }
 
 // popSlice pops a buffer off the JavaScript stack and returns it as a slice.
@@ -670,7 +666,7 @@ func (jst *JsTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Ad
 	jst.ctx["to"] = to
 	jst.ctx["input"] = input
 	jst.ctx["gas"] = gas
-	jst.ctx["gasPrice"] = env.Context.GasPrice
+	jst.ctx["gasPrice"] = env.TxContext.GasPrice
 	jst.ctx["value"] = value
 
 	// Initialize the context
@@ -682,9 +678,10 @@ func (jst *JsTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Ad
 
 	// Compute intrinsic gas
 	isHomestead := env.ChainConfig().IsHomestead(env.Context.BlockNumber)
+	isEIP1559 := env.ChainConfig().IsEIP1559(env.Context.BlockNumber)
 	// after update core.IntrinsicGas, use isIstanbul in it
 	// isIstanbul := env.ChainConfig().IsIstanbul(env.Context.BlockNumber)
-	intrinsicGas, err := core.IntrinsicGas(input, nil, jst.ctx["type"] == "CREATE", isHomestead)
+	intrinsicGas, err := core.IntrinsicGas(input, nil, jst.ctx["type"] == "CREATE", isHomestead, isEIP1559)
 	if err != nil {
 		return
 	}

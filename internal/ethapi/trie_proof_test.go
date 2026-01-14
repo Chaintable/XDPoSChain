@@ -49,11 +49,13 @@ func TestTransactionProof(t *testing.T) {
 	transactions := types.Transactions([]*types.Transaction{t1, t2, t3, t4})
 	tr := deriveTrie(transactions)
 	// for verifying the proof
-	root := types.DeriveSha(transactions)
+	root := types.DeriveSha(transactions, trie.NewStackTrie(nil))
 	for i := 0; i < transactions.Len(); i++ {
 		var proof proofPairList
 		keybuf := new(bytes.Buffer)
-		rlp.Encode(keybuf, uint(i))
+		if err := rlp.Encode(keybuf, uint(i)); err != nil {
+			t.Fatalf("rlp.Encode fail: %v", err)
+		}
 		if err := tr.Prove(keybuf.Bytes(), 0, &proof); err != nil {
 			t.Fatal("Prove err:", err)
 		}
@@ -82,11 +84,13 @@ func TestReceiptProof(t *testing.T) {
 	receipts := types.Receipts([]*types.Receipt{r1, r2, r3, r4})
 	tr := deriveTrie(receipts)
 	// for verifying the proof
-	root := types.DeriveSha(receipts)
+	root := types.DeriveSha(receipts, trie.NewStackTrie(nil))
 	for i := 0; i < receipts.Len(); i++ {
 		var proof proofPairList
 		keybuf := new(bytes.Buffer)
-		rlp.Encode(keybuf, uint(i))
+		if err := rlp.Encode(keybuf, uint(i)); err != nil {
+			t.Fatalf("rlp.Encode fail: %v", err)
+		}
 		if err := tr.Prove(keybuf.Bytes(), 0, &proof); err != nil {
 			t.Fatal("Prove err:", err)
 		}
