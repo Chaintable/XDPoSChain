@@ -22,10 +22,13 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Chaintable/pipeline/tracer"
+	ptypes "github.com/Chaintable/pipeline/types"
 	"github.com/XinFinOrg/XDPoSChain/XDCx/tradingstate"
 	"github.com/XinFinOrg/XDPoSChain/XDCxlending/lendingstate"
 	"github.com/XinFinOrg/XDPoSChain/accounts/abi/bind"
@@ -40,6 +43,7 @@ import (
 	contractValidator "github.com/XinFinOrg/XDPoSChain/contracts/validator/contract"
 	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
 	"github.com/XinFinOrg/XDPoSChain/core/state"
+	"github.com/XinFinOrg/XDPoSChain/core/tracing"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/core/vm"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
@@ -217,6 +221,8 @@ type BlockChain struct {
 	resultLendingTrade  *lru.Cache[common.Hash, interface{}]
 	rejectedLendingItem *lru.Cache[common.Hash, interface{}]
 	finalizedTrade      *lru.Cache[common.Hash, interface{}] // include both trades which force update to closed/liquidated by the protocol
+
+	logger *tracing.Hooks
 }
 
 // NewBlockChain returns a fully initialised block chain using information
@@ -298,6 +304,30 @@ func NewBlockChain(db ethdb.Database, cacheConfig *CacheConfig, chainConfig *par
 	bc.wg.Add(1)
 	go bc.futureBlocksLoop()
 
+	if vmConfig.Tracer != nil {
+		if _, ok := vmConfig.Tracer.(*tracer.PipelineTracer); !ok {
+			log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+		} else {
+			bc.logger = buildHooks(vmConfig.Tracer.(*tracer.PipelineTracer))
+		}
+	}
+
+	if bc.logger != nil && bc.logger.OnBlockchainInit != nil {
+		bc.logger.OnBlockchainInit(chainConfig)
+	}
+
+	if bc.logger != nil && bc.logger.OnGenesisBlock != nil {
+		if block := bc.CurrentBlock(); block.Number().Uint64() == 0 {
+			alloc, err := getGenesisState(block.Hash())
+			if err != nil {
+				return nil, fmt.Errorf("failed to get genesis state: %w", err)
+			}
+			if alloc == nil {
+				return nil, errors.New("requires genesis alloc to be set")
+			}
+			bc.logger.OnGenesisBlock(bc.genesisBlock, coreGenesisToTypesGenesis(alloc))
+		}
+	}
 	return bc, nil
 }
 
@@ -1128,6 +1158,9 @@ func (bc *BlockChain) Stop() {
 	bc.wg.Wait()
 	bc.saveData()
 	log.Info("Blockchain manager stopped")
+	if bc.logger != nil && bc.logger.OnClose != nil {
+		bc.logger.OnClose()
+	}
 }
 
 // InterruptInsert interrupts all insertion methods, causing them to return
@@ -1559,6 +1592,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			}
 		}
 	}
+	bc.pushBlockChange(block)
 	// save cache BlockSigners
 	if bc.chainConfig.XDPoS != nil && bc.chainConfig.IsTIPSigning(block.Number()) {
 		engine, ok := bc.Engine().(*XDPoS.XDPoS)
@@ -1852,8 +1886,24 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, []
 		feeCapacity := state.GetTRC21FeeCapacityFromStateWithCache(parent.Root(), statedb)
 		// Process block using the parent state as reference point.
 		t0 := time.Now()
+		log.Info("insertChain new block", "blockNumber", block.Number(), "hash", block.Hash().String(), "parentRoot", parent.Root().String())
+		var pipelineTracer *tracer.PipelineTracer
+		if bc.vmConfig.Tracer != nil {
+			if p, ok := bc.vmConfig.Tracer.(*tracer.PipelineTracer); !ok {
+				log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+			} else {
+				pipelineTracer = p
+			}
+		}
+		if pipelineTracer != nil {
+			pipelineTracer.OnBlockStart(block)
+			statedb.SetHooks(buildHooks(pipelineTracer))
+		}
 		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, tradingState, bc.vmConfig, feeCapacity)
 		t1 := time.Now()
+		if pipelineTracer != nil {
+			pipelineTracer.OnBlockEnd(err)
+		}
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			return i, events, coalescedLogs, err
@@ -3014,4 +3064,129 @@ func (bc *BlockChain) AddLendingResult(txHash common.Hash, lendingResults map[co
 
 func (bc *BlockChain) AddFinalizedTrades(txHash common.Hash, trades map[common.Hash]*lendingstate.LendingTrade) {
 	bc.finalizedTrade.Add(txHash, trades)
+}
+
+// 返回两个块的共同祖先，以及两个块的从共同祖先到两个块的路径,即drop和new
+func (bc *BlockChain) getCommonAncestor(blocka ptypes.BlockContext, blockb ptypes.BlockContext) (ptypes.BlockContext, []ptypes.BlockContext, []ptypes.BlockContext) {
+	var (
+		chainA, chainB []ptypes.BlockContext
+	)
+	if blockb.ParentHash == blocka.Hash {
+		return blocka, chainA, []ptypes.BlockContext{blockb}
+	}
+	for blockb.BlockNumber > blocka.BlockNumber {
+		chainB = append(chainB, blockb)
+		headerb := bc.GetHeaderByHash(blockb.ParentHash)
+		if headerb == nil {
+			log.Crit("Failed to get header by hash", "hash", blockb.ParentHash)
+		} else {
+			blockb = ptypes.BlockContext{
+				BlockNumber: headerb.Number.Uint64(),
+				Hash:        headerb.Hash(),
+				ParentHash:  headerb.ParentHash,
+				Timestamp:   headerb.Time.Uint64(),
+			}
+		}
+	}
+	for blocka.Hash != blockb.Hash {
+		chainA = append(chainA, blocka)
+		headera := bc.GetHeaderByHash(blocka.ParentHash)
+		if headera == nil {
+			log.Crit("Failed to get header by hash", "hash", blocka.ParentHash)
+		} else {
+			blocka = ptypes.BlockContext{
+				BlockNumber: headera.Number.Uint64(),
+				Hash:        headera.Hash(),
+				ParentHash:  headera.ParentHash,
+				Timestamp:   headera.Time.Uint64(),
+			}
+		}
+
+		chainB = append(chainB, blockb)
+		headerb := bc.GetHeaderByHash(blockb.ParentHash)
+		if headerb == nil {
+			log.Crit("Failed to get header by hash", "hash", blockb.ParentHash)
+		} else {
+			blockb = ptypes.BlockContext{
+				BlockNumber: headerb.Number.Uint64(),
+				Hash:        headerb.Hash(),
+				ParentHash:  headerb.ParentHash,
+				Timestamp:   headerb.Time.Uint64(),
+			}
+		}
+	}
+	// now blocka == blockb == ancestor
+
+	// reverse chainA
+	slices.Reverse(chainA)
+	// reverse chainB
+	slices.Reverse(chainB)
+	return blocka, chainA, chainB
+}
+
+// pushBlockChange push block change to kafka, support debank union nodes
+func (bc *BlockChain) pushBlockChange(block *types.Block) {
+	// 先确保 pipeline tracer 不为空，然后再判断是否需要push kafka
+	// 上一个push kafka的block, 必然存在(至少有genesis block)
+	// 上一个push kafka的block比当前的head block还要新，说明有unwind回退，不需要处理, 即使是fork，等有更新的block的时候再一起push
+	if tracer.NodeXPusher != nil && tracer.NodeXPusher.LastPushedBlock().BlockNumber <= block.NumberU64() {
+		lastPushBlock := tracer.NodeXPusher.LastPushedBlock()
+		_, dropBlocks, newBlocks := bc.getCommonAncestor(*lastPushBlock, ptypes.BlockContext{
+			BlockNumber: block.NumberU64(),
+			Hash:        block.Hash(),
+			ParentHash:  block.ParentHash(),
+			Timestamp:   block.Time().Uint64(),
+		})
+		var blockChange *ptypes.BlockChangeNotification
+		if len(dropBlocks) > 0 {
+			blockChange = &ptypes.BlockChangeNotification{
+				ChangeType: 2,
+				NewBlocks:  newBlocks,
+				DropBlocks: dropBlocks,
+			}
+		} else if len(newBlocks) > 0 {
+			blockChange = &ptypes.BlockChangeNotification{
+				ChangeType: 1,
+				NewBlocks:  newBlocks,
+			}
+		}
+
+		parent := bc.GetHeaderByHash(block.Header().ParentHash)
+
+		if parent.Root == block.Root() {
+			bc.logger.OnCommit(parent.Root, block.Root(), nil, nil, nil, nil, nil, nil)
+		}
+
+		if blockChange != nil {
+			err := tracer.NodeXPusher.PushBlockChangeNotification(blockChange)
+			if err != nil {
+				log.Error("SetCanonical PushBlockChangeNotification error", "err", err)
+			}
+			log.Info("NodeXPusher PushBlockChangeNotification", "blockChange", blockChange)
+		}
+	}
+}
+
+func buildHooks(t *tracer.PipelineTracer) *tracing.Hooks {
+	return &tracing.Hooks{
+		OnBlockchainInit: t.OnBlockchainInit,
+		OnClose:          t.OnClose,
+		OnBlockStart:     t.OnBlockStart,
+		OnTxStart:        t.OnTxStart,
+		OnTxEnd:          t.OnTxEnd,
+		OnLog:            t.OnLog,
+		OnGenesisBlock: func(genesis *types.Block, alloc types.GenesisAlloc) {
+			palloc := make(map[common.Address]ptypes.GenesisAccount, len(alloc))
+			for addr, acc := range alloc {
+				palloc[addr] = ptypes.GenesisAccount{
+					Balance: acc.Balance,
+					Code:    acc.Code,
+					Storage: acc.Storage,
+					Nonce:   acc.Nonce,
+				}
+			}
+			t.OnGenesisBlock(genesis, palloc)
+		},
+		OnCommit: t.OnCommit,
+	}
 }

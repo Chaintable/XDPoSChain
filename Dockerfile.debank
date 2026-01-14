@@ -1,0 +1,30 @@
+# builder image
+FROM golang:1.24-bookworm as builder
+
+ARG GITHUB_TOKEN
+
+ENV GODEBUG=randseednop=0
+
+RUN git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com".insteadOf "https://github.com"
+
+WORKDIR /XDPoSChain
+
+COPY . .
+
+RUN make XDC
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y ca-certificates wget libsnappy-dev libjemalloc-dev
+
+# https://github.com/golang/go/issues/67273
+ENV GODEBUG=randseednop=0
+
+WORKDIR /app
+
+COPY --from=builder /XDPoSChain/build/bin /app
+
+
+EXPOSE 8545 8546 33688 33688/udp
+
+ENTRYPOINT ["/app/XDC"]

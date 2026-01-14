@@ -805,6 +805,12 @@ var (
 		DataDirFlag,
 		XDCXDataDirFlag,
 	}
+
+	VMTraceJsonConfigFlag = &cli.StringFlag{
+		Name:  "vmtrace.jsonconfig",
+		Usage: "Tracer configuration (JSON)",
+		Value: "{}",
+	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1508,6 +1514,12 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		cfg.Genesis = core.DeveloperGenesisBlock(uint64(ctx.Int(DeveloperPeriodFlag.Name)), developer.Address)
 		if !ctx.IsSet(MinerGasPriceFlag.Name) {
 			cfg.GasPrice = big.NewInt(1)
+		}
+	}
+	// TODO(fjl): move trie cache generations into config
+	if ctx.IsSet(VMTraceJsonConfigFlag.Name) {
+		if vmTraceCfg := ctx.String(VMTraceJsonConfigFlag.Name); vmTraceCfg != "" {
+			cfg.VMTraceCfg = vmTraceCfg
 		}
 	}
 }

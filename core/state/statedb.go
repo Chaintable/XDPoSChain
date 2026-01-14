@@ -26,6 +26,7 @@ import (
 
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/core/rawdb"
+	"github.com/XinFinOrg/XDPoSChain/core/tracing"
 	"github.com/XinFinOrg/XDPoSChain/core/types"
 	"github.com/XinFinOrg/XDPoSChain/crypto"
 	"github.com/XinFinOrg/XDPoSChain/log"
@@ -93,6 +94,14 @@ type StateDB struct {
 	StorageHashes  time.Duration
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
+
+	hooks      *tracing.Hooks
+	originRoot common.Hash // The root hash of the state before the last commit
+
+	Destructs map[common.Hash]struct{}
+	Accounts  map[common.Hash][]byte
+	Storages  map[common.Hash]map[common.Hash][]byte
+	Codes     map[common.Hash][]byte
 }
 
 type AccountInfo struct {
@@ -119,6 +128,11 @@ func New(root common.Hash, db Database) (*StateDB, error) {
 		preimages:           make(map[common.Hash][]byte),
 		accessList:          newAccessList(),
 		transientStorage:    newTransientStorage(),
+		originRoot:          root,
+		Destructs:           make(map[common.Hash]struct{}),
+		Accounts:            make(map[common.Hash][]byte),
+		Storages:            make(map[common.Hash]map[common.Hash][]byte),
+		Codes:               make(map[common.Hash][]byte),
 	}, nil
 }
 
@@ -162,6 +176,9 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.Index = s.logSize
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
+	if s.hooks != nil && s.hooks.OnLog != nil {
+		s.hooks.OnLog(log)
+	}
 }
 
 func (s *StateDB) GetLogs(hash common.Hash, blockHash common.Hash) []*types.Log {
@@ -509,6 +526,8 @@ func (s *StateDB) DeleteAddress(addr common.Address) {
 	if stateObject != nil && !stateObject.deleted {
 		stateObject.deleted = true
 		s.deleteStateObject(stateObject)
+		addrHash := crypto.Keccak256Hash(addr.Bytes())
+		s.Destructs[addrHash] = struct{}{}
 	}
 }
 
@@ -654,7 +673,12 @@ func (s *StateDB) Copy() *StateDB {
 		refund:              s.refund,
 		logs:                make(map[common.Hash][]*types.Log, len(s.logs)),
 		logSize:             s.logSize,
+		originRoot:          s.originRoot,
 		preimages:           make(map[common.Hash][]byte),
+		Destructs:           make(map[common.Hash]struct{}),
+		Accounts:            make(map[common.Hash][]byte),
+		Storages:            make(map[common.Hash]map[common.Hash][]byte),
+		Codes:               make(map[common.Hash][]byte),
 	}
 	// Above, we don't copy the actual journal. This means that if the copy is copied, the
 	// loop above will be a no-op, since the copy's journal is empty.
@@ -694,6 +718,19 @@ func (s *StateDB) Copy() *StateDB {
 
 	state.transientStorage = s.transientStorage.Copy()
 
+	for addr := range s.Destructs {
+		state.Destructs[addr] = struct{}{}
+	}
+
+	for addr, acc := range s.Accounts {
+		state.Accounts[addr] = acc
+	}
+	for addr, storages := range s.Storages {
+		state.Storages[addr] = storages
+	}
+	for codehash, code := range s.Codes {
+		state.Codes[codehash] = code
+	}
 	return state
 }
 
@@ -814,18 +851,42 @@ func (s *StateDB) clearJournalAndRefund() {
 }
 
 // Commit writes the state to the underlying in-memory trie database.
-func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
+func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) {
 	// Finalize any pending changes and merge everything into the tries
 	s.IntermediateRoot(deleteEmptyObjects)
 
 	// Commit objects to the trie, measuring the elapsed time
 	codeWriter := s.db.TrieDB().DiskDB().NewBatch()
+
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
+
 	for addr := range s.stateObjectsDirty {
 		if obj := s.stateObjects[addr]; !obj.deleted {
 			// Write any contract code associated with the state object
 			if obj.code != nil && obj.dirtyCode {
 				rawdb.WriteCode(codeWriter, common.BytesToHash(obj.CodeHash()), obj.code)
+				s.Codes[common.BytesToHash(obj.CodeHash())] = obj.code
 				obj.dirtyCode = false
+			}
+
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(obj.data)
+			if err != nil {
+				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			s.Accounts[addrHash] = abuf
+			for key, val := range obj.dirtyStorage {
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := s.Storages[addrHash]; !ok {
+					s.Storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				s.Storages[addrHash][hash] = encode(val)
 			}
 			// Write any storage changes in the state object to its storage trie.
 			if err := obj.CommitTrie(s.db); err != nil {
@@ -844,6 +905,15 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 	// Write the account trie changes, measuing the amount of wasted time
 	defer func(start time.Time) { s.AccountCommits += time.Since(start) }(time.Now())
 
+	defer func() {
+		if s.hooks != nil && s.hooks.OnCommit != nil {
+			s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+			s.Destructs = make(map[common.Hash]struct{})
+			s.Accounts = make(map[common.Hash][]byte)
+			s.Storages = make(map[common.Hash]map[common.Hash][]byte)
+			s.Codes = make(map[common.Hash][]byte)
+		}
+	}()
 	return s.trie.Commit(func(leaf []byte, parent common.Hash) error {
 		var account Account
 		if err := rlp.DecodeBytes(leaf, &account); err != nil {
@@ -938,4 +1008,8 @@ func (s *StateDB) GetOwner(candidate common.Address) common.Address {
 	locCandidateOwner := locValidatorsState.Add(locValidatorsState, new(big.Int).SetUint64(uint64(0)))
 	ret := s.GetState(common.MasternodeVotingSMCBinary, common.BigToHash(locCandidateOwner))
 	return common.HexToAddress(ret.Hex())
+}
+
+func (s *StateDB) SetHooks(hooks *tracing.Hooks) {
+	s.hooks = hooks
 }

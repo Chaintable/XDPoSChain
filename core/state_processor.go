@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Chaintable/pipeline/tracer"
 	"github.com/XinFinOrg/XDPoSChain/XDCx/tradingstate"
 	"github.com/XinFinOrg/XDPoSChain/common"
 	"github.com/XinFinOrg/XDPoSChain/consensus"
@@ -76,6 +77,14 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, tra
 		allLogs     []*types.Log
 		gp          = new(GasPool).AddGas(block.GasLimit())
 	)
+	var pipelineTracer *tracer.PipelineTracer
+	if cfg.Tracer != nil {
+		if p, ok := cfg.Tracer.(*tracer.PipelineTracer); !ok {
+			log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+		} else {
+			pipelineTracer = p
+		}
+	}
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
@@ -118,7 +127,21 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, tra
 			}
 		}
 		statedb.SetTxContext(tx.Hash(), i)
+		if pipelineTracer != nil {
+			to := tx.To()
+			var bf *big.Int
+			if to != nil {
+				if value, ok := balanceFee[*to]; ok {
+					bf = value
+				}
+			}
+			msg, _ := tx.AsMessage(types.MakeSigner(p.config, header.Number), bf, header.Number, header.BaseFee)
+			pipelineTracer.OnTxStart(tx, msg.From())
+		}
 		receipt, gas, err, tokenFeeUsed := applyTransaction(p.config, balanceFee, gp, statedb, coinbaseOwner, blockNumber, header.BaseFee, blockHash, tx, usedGas, vmenv)
+		if pipelineTracer != nil {
+			pipelineTracer.OnTxEnd(receipt, err)
+		}
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
