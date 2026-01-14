@@ -10,6 +10,7 @@ import (
 
 	"github.com/XinFinOrg/XDPoSChain/log"
 	"github.com/XinFinOrg/XDPoSChain/metrics"
+	"github.com/XinFinOrg/XDPoSChain/metrics/prometheus"
 )
 
 type exp struct {
@@ -56,6 +57,7 @@ func ExpHandler(r metrics.Registry) http.Handler {
 func Setup(address string) {
 	m := http.NewServeMux()
 	m.Handle("/debug/metrics", ExpHandler(metrics.DefaultRegistry))
+	m.Handle("/debug/metrics/prometheus", prometheus.Handler(metrics.DefaultRegistry))
 	log.Info("Starting metrics server", "addr", fmt.Sprintf("http://%s/debug/metrics", address))
 	go func() {
 		if err := http.ListenAndServe(address, m); err != nil {
@@ -103,6 +105,24 @@ func (exp *exp) publishGauge(name string, metric metrics.Gauge) {
 }
 func (exp *exp) publishGaugeFloat64(name string, metric metrics.GaugeFloat64) {
 	exp.getFloat(name).Set(metric.Value())
+}
+
+func (exp *exp) getInfo(name string) *expvar.String {
+	var v *expvar.String
+	exp.expvarLock.Lock()
+	p := expvar.Get(name)
+	if p != nil {
+		v = p.(*expvar.String)
+	} else {
+		v = new(expvar.String)
+		expvar.Publish(name, v)
+	}
+	exp.expvarLock.Unlock()
+	return v
+}
+
+func (exp *exp) publishGaugeInfo(name string, metric metrics.GaugeInfoSnapshot) {
+	exp.getInfo(name).Set(metric.Value().String())
 }
 
 func (exp *exp) publishHistogram(name string, metric metrics.Histogram) {
@@ -168,6 +188,8 @@ func (exp *exp) syncToExpvar() {
 			exp.publishGauge(name, i)
 		case metrics.GaugeFloat64:
 			exp.publishGaugeFloat64(name, i)
+		case *metrics.GaugeInfo:
+			exp.publishGaugeInfo(name, i.Snapshot())
 		case metrics.Histogram:
 			exp.publishHistogram(name, i)
 		case metrics.Meter:

@@ -18,6 +18,7 @@
 package eth
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -25,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Chaintable/pipeline/tracer"
 	"github.com/XinFinOrg/XDPoSChain/XDCx"
 	"github.com/XinFinOrg/XDPoSChain/XDCxlending"
 	"github.com/XinFinOrg/XDPoSChain/accounts"
@@ -162,6 +164,15 @@ func New(ctx *node.ServiceContext, config *ethconfig.Config, XDCXServ *XDCx.XDCX
 		vmConfig    = vm.Config{EnablePreimageRecording: config.EnablePreimageRecording}
 		cacheConfig = &core.CacheConfig{Disabled: config.NoPruning, TrieNodeLimit: config.TrieCache, TrieTimeLimit: config.TrieTimeout}
 	)
+	if config.VMTraceCfg != "" {
+		log.Info("vmtrace config", "config", config.VMTraceCfg)
+		t, err := tracer.NewPipelineTracer(json.RawMessage(config.VMTraceCfg))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create tracer %s: %v", config.VMTraceCfg, err)
+		}
+		vmConfig.Tracer = t
+		vmConfig.Debug = true
+	}
 	if eth.chainConfig.XDPoS != nil {
 		c := eth.engine.(*XDPoS.XDPoS)
 		c.GetXDCXService = func() utils.TradingService {
