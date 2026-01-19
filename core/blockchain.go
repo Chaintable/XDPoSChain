@@ -2273,6 +2273,7 @@ func (bc *BlockChain) insertBlock(block *types.Block) ([]interface{}, []*types.L
 	if bc.HasBlockAndFullState(block.Hash(), block.NumberU64()) {
 		return events, coalescedLogs, nil
 	}
+	log.Info("insertBlock new block", "blockNumber", block.Number(), "hash", block.Hash().String())
 	status, err := bc.writeBlockWithState(block, result.receipts, result.state, result.tradingState, result.lendingState)
 
 	if err != nil {
