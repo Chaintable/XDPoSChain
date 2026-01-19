@@ -905,16 +905,7 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 	// Write the account trie changes, measuing the amount of wasted time
 	defer func(start time.Time) { s.AccountCommits += time.Since(start) }(time.Now())
 
-	defer func() {
-		if s.hooks != nil && s.hooks.OnCommit != nil {
-			s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
-			s.Destructs = make(map[common.Hash]struct{})
-			s.Accounts = make(map[common.Hash][]byte)
-			s.Storages = make(map[common.Hash]map[common.Hash][]byte)
-			s.Codes = make(map[common.Hash][]byte)
-		}
-	}()
-	return s.trie.Commit(func(leaf []byte, parent common.Hash) error {
+	root, err = s.trie.Commit(func(leaf []byte, parent common.Hash) error {
 		var account Account
 		if err := rlp.DecodeBytes(leaf, &account); err != nil {
 			return nil
@@ -924,6 +915,14 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		}
 		return nil
 	})
+	if s.hooks != nil && s.hooks.OnCommit != nil {
+		s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+		s.Destructs = make(map[common.Hash]struct{})
+		s.Accounts = make(map[common.Hash][]byte)
+		s.Storages = make(map[common.Hash]map[common.Hash][]byte)
+		s.Codes = make(map[common.Hash][]byte)
+	}
+	return root, err
 }
 
 // Prepare handles the preparatory steps for executing a state transition with.
