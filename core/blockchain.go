@@ -1897,7 +1897,6 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals bool) (int, []
 		}
 		if pipelineTracer != nil {
 			pipelineTracer.OnBlockStart(block)
-			statedb.SetHooks(buildHooks(pipelineTracer))
 		}
 		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, tradingState, bc.vmConfig, feeCapacity)
 		t1 := time.Now()
@@ -2204,8 +2203,22 @@ func (bc *BlockChain) getResultBlock(block *types.Block, verifiedM2 bool) (*Resu
 		}
 	}
 	feeCapacity := state.GetTRC21FeeCapacityFromStateWithCache(parent.Root(), statedb)
+	var pipelineTracer *tracer.PipelineTracer
+	if bc.vmConfig.Tracer != nil {
+		if p, ok := bc.vmConfig.Tracer.(*tracer.PipelineTracer); !ok {
+			log.Crit("vmConfig.Tracer must be a pipeline.Tracer")
+		} else {
+			pipelineTracer = p
+		}
+	}
+	if pipelineTracer != nil {
+		pipelineTracer.OnBlockStart(block)
+	}
 	// Process block using the parent state as reference point.
 	receipts, logs, usedGas, err := bc.processor.ProcessBlockNoValidator(calculatedBlock, statedb, tradingState, bc.vmConfig, feeCapacity)
+	if pipelineTracer != nil {
+		pipelineTracer.OnBlockEnd(err)
+	}
 	process := time.Since(bstart)
 	if err != nil {
 		if err != ErrStopPreparingBlock {

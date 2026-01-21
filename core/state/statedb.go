@@ -95,7 +95,8 @@ type StateDB struct {
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
 
-	hooks      *tracing.Hooks
+	OnLog      tracing.LogHook
+	OnCommit   tracing.CommitHook
 	originRoot common.Hash // The root hash of the state before the last commit
 
 	Destructs map[common.Hash]struct{}
@@ -176,8 +177,8 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.Index = s.logSize
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
-	if s.hooks != nil && s.hooks.OnLog != nil {
-		s.hooks.OnLog(log)
+	if s.OnLog != nil {
+		s.OnLog(log)
 	}
 }
 
@@ -915,8 +916,8 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		}
 		return nil
 	})
-	if s.hooks != nil && s.hooks.OnCommit != nil {
-		s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+	if s.OnCommit != nil {
+		s.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
 		s.Destructs = make(map[common.Hash]struct{})
 		s.Accounts = make(map[common.Hash][]byte)
 		s.Storages = make(map[common.Hash]map[common.Hash][]byte)
@@ -1009,6 +1010,10 @@ func (s *StateDB) GetOwner(candidate common.Address) common.Address {
 	return common.HexToAddress(ret.Hex())
 }
 
-func (s *StateDB) SetHooks(hooks *tracing.Hooks) {
-	s.hooks = hooks
+func (s *StateDB) SetOnLog(onLog tracing.LogHook) {
+	s.OnLog = onLog
+}
+
+func (s *StateDB) SetOnCommit(onCommit tracing.CommitHook) {
+	s.OnCommit = onCommit
 }
