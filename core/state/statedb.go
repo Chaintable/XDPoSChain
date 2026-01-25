@@ -882,13 +882,14 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
 			}
 			s.Accounts[addrHash] = abuf
-			for key, val := range obj.dirtyStorage {
+			for key, val := range obj.commitStorage {
 				hash := crypto.Keccak256Hash(key[:])
 				if _, ok := s.Storages[addrHash]; !ok {
 					s.Storages[addrHash] = make(map[common.Hash][]byte)
 				}
 				s.Storages[addrHash][hash] = encode(val)
 			}
+			obj.commitStorage = make(Storage)
 			// Write any storage changes in the state object to its storage trie.
 			if err := obj.CommitTrie(s.db); err != nil {
 				return common.Hash{}, err
@@ -906,7 +907,16 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 	// Write the account trie changes, measuing the amount of wasted time
 	defer func(start time.Time) { s.AccountCommits += time.Since(start) }(time.Now())
 
-	root, err = s.trie.Commit(func(leaf []byte, parent common.Hash) error {
+	defer func() {
+		if s.OnCommit != nil {
+			s.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+			s.Destructs = make(map[common.Hash]struct{})
+			s.Accounts = make(map[common.Hash][]byte)
+			s.Storages = make(map[common.Hash]map[common.Hash][]byte)
+			s.Codes = make(map[common.Hash][]byte)
+		}
+	}()
+	return s.trie.Commit(func(leaf []byte, parent common.Hash) error {
 		var account Account
 		if err := rlp.DecodeBytes(leaf, &account); err != nil {
 			return nil
@@ -916,14 +926,6 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 		}
 		return nil
 	})
-	if s.OnCommit != nil {
-		s.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
-		s.Destructs = make(map[common.Hash]struct{})
-		s.Accounts = make(map[common.Hash][]byte)
-		s.Storages = make(map[common.Hash]map[common.Hash][]byte)
-		s.Codes = make(map[common.Hash][]byte)
-	}
-	return root, err
 }
 
 // Prepare handles the preparatory steps for executing a state transition with.

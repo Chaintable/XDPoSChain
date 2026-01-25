@@ -80,6 +80,7 @@ type stateObject struct {
 	originStorage  Storage // Storage cache of original entries to dedup rewrites, reset for every transaction
 	pendingStorage Storage // Storage entries that need to be flushed to disk, at the end of an entire block
 	dirtyStorage   Storage // Storage entries that need to be flushed to disk
+	commitStorage  Storage // Storage entries that have been committed to the database, used for debugging
 
 	// Cache flags.
 	dirtyCode bool // true if the code was updated
@@ -134,6 +135,7 @@ func newObject(db *StateDB, address common.Address, data Account, onDirty func(a
 		originStorage:  make(Storage),
 		pendingStorage: make(Storage),
 		dirtyStorage:   make(Storage),
+		commitStorage:  make(Storage),
 		onDirty:        onDirty,
 	}
 }
@@ -252,6 +254,7 @@ func (s *stateObject) setState(key, value common.Hash) {
 func (s *stateObject) finalise() {
 	for key, value := range s.dirtyStorage {
 		s.pendingStorage[key] = value
+		s.commitStorage[key] = value // For debugging purpose, to track committed storage
 	}
 	if len(s.dirtyStorage) > 0 {
 		s.dirtyStorage = make(Storage)
