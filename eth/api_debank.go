@@ -22,6 +22,13 @@ import (
 	"github.com/XinFinOrg/XDPoSChain/rpc"
 )
 
+type DebankOutPutRaw struct {
+	BlockFile      *ptypes.BlockFile        `json:"block_file"`
+	Header         *ptypes.Header           `json:"header"`
+	StateDiff      *ptypes.BlockStorageDiff `json:"state_diff"`
+	ValidationHash int64                    `json:"validation_hash"`
+}
+
 type DebankAPI struct {
 	eth *Ethereum
 }
@@ -30,6 +37,24 @@ func NewDebankAPI(eth *Ethereum) *DebankAPI {
 	return &DebankAPI{
 		eth: eth,
 	}
+}
+
+func (api *DebankAPI) DebankBlockRaw(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*DebankOutPutRaw, error) {
+	output, err := api.DebankBlock(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	var stateDiff ptypes.BlockStorageDiff
+	err = util.DecodeFromRlp(output.StateDiff, &stateDiff)
+	if err != nil {
+		return nil, err
+	}
+	return &DebankOutPutRaw{
+		BlockFile:      output.BlockFile,
+		Header:         output.Header,
+		StateDiff:      &stateDiff,
+		ValidationHash: output.ValidationHash,
+	}, nil
 }
 
 func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*ptypes.DebankOutPut, error) {
