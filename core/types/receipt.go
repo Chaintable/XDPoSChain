@@ -268,6 +268,10 @@ func (r *Receipt) Size() common.StorageSize {
 	return size
 }
 
+func (r *Receipt) SetEffectiveGasPrice(tx *Transaction, baseFee *big.Int) {
+	r.EffectiveGasPrice = tx.inner.effectiveGasPrice(new(big.Int), baseFee)
+}
+
 // String implements the Stringer interface.
 func (r *Receipt) String() string {
 	if len(r.PostState) == 0 {

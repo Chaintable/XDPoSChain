@@ -142,8 +142,6 @@ type Config struct {
 	// RPCTxFeeCap is the global transaction fee(price * gaslimit) cap for
 	// send-transction variants. The unit is ether.
 	RPCTxFeeCap float64
-
-	VMTraceCfg string
 }
 
 type configMarshaling struct {

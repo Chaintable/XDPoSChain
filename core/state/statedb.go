@@ -894,6 +894,10 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 			if err := obj.CommitTrie(s.db); err != nil {
 				return common.Hash{}, err
 			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			s.Destructs[addrHash] = struct{}{}
 		}
 	}
 	if len(s.stateObjectsDirty) > 0 {
@@ -1018,4 +1022,48 @@ func (s *StateDB) SetOnLog(onLog tracing.LogHook) {
 
 func (s *StateDB) SetOnCommit(onCommit tracing.CommitHook) {
 	s.OnCommit = onCommit
+}
+
+// StateDiff returns the state diff for RPC tracing without committing.
+// Returns: root hash, destructs, accounts, storages, codes, error
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (common.Hash, map[common.Hash]struct{}, map[common.Hash][]byte, map[common.Hash]map[common.Hash][]byte, map[common.Hash][]byte, error) {
+	// Finalize any pending changes and merge everything into the tries
+	root := s.IntermediateRoot(deleteEmptyObjects)
+
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
+
+	// Collect state changes without committing
+	for addr := range s.stateObjectsDirty {
+		if obj := s.stateObjects[addr]; !obj.deleted {
+			// Collect contract code
+			if obj.code != nil && obj.dirtyCode {
+				s.Codes[common.BytesToHash(obj.CodeHash())] = obj.code
+			}
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(obj.data)
+			if err != nil {
+				return common.Hash{}, nil, nil, nil, nil, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			s.Accounts[addrHash] = abuf
+			for key, val := range obj.commitStorage {
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := s.Storages[addrHash]; !ok {
+					s.Storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				s.Storages[addrHash][hash] = encode(val)
+			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			s.Destructs[addrHash] = struct{}{}
+		}
+	}
+
+	return root, s.Destructs, s.Accounts, s.Storages, s.Codes, nil
 }

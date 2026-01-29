@@ -805,12 +805,6 @@ var (
 		DataDirFlag,
 		XDCXDataDirFlag,
 	}
-
-	VMTraceJsonConfigFlag = &cli.StringFlag{
-		Name:  "vmtrace.jsonconfig",
-		Usage: "Tracer configuration (JSON)",
-		Value: "{}",
-	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1517,11 +1511,6 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 		}
 	}
 	// TODO(fjl): move trie cache generations into config
-	if ctx.IsSet(VMTraceJsonConfigFlag.Name) {
-		if vmTraceCfg := ctx.String(VMTraceJsonConfigFlag.Name); vmTraceCfg != "" {
-			cfg.VMTraceCfg = vmTraceCfg
-		}
-	}
 }
 
 // RegisterEthService adds an Ethereum client to the stack.
