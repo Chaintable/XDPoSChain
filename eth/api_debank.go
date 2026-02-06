@@ -160,7 +160,7 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 
 	var receipts = make(types.Receipts, 0)
 	for i, tx := range txs {
-
+		statedb.SetTxContext(tx.Hash(), i)
 		rpcTracer.OnTxStart(tx, *tx.From())
 
 		// Apply the transaction
