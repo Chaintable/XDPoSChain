@@ -562,3 +562,26 @@ func InitSignerInTransactions(config *params.ChainConfig, header *types.Header, 
 	}
 	wg.Wait()
 }
+
+// IsSkipEvmTransaction Copy from `applyTransaction`
+func IsSkipEvmTransaction(config *params.ChainConfig, blockNumber *big.Int, tx *types.Transaction) bool {
+	to := tx.To()
+	if to != nil {
+		if *to == common.BlockSignersBinary && config.IsTIPSigning(blockNumber) {
+			return true
+		}
+		if *to == common.TradingStateAddrBinary && config.IsTIPXDCXReceiver(blockNumber) {
+			return true
+		}
+		if *to == common.XDCXLendingAddressBinary && config.IsTIPXDCXReceiver(blockNumber) {
+			return true
+		}
+	}
+	if tx.IsTradingTransaction() && config.IsTIPXDCXReceiver(blockNumber) {
+		return true
+	}
+	if tx.IsLendingFinalizedTradeTransaction() && config.IsTIPXDCXReceiver(blockNumber) {
+		return true
+	}
+	return false
+}

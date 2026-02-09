@@ -161,7 +161,11 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 	var receipts = make(types.Receipts, 0)
 	for i, tx := range txs {
 		statedb.SetTxContext(tx.Hash(), i)
-		rpcTracer.OnTxStart(tx, *tx.From())
+		if core.IsSkipEvmTransaction(api.eth.chainConfig, block.Number(), tx) {
+			rpcTracer.OnSkipEvmTxStart(tx, *tx.From())
+		} else {
+			rpcTracer.OnTxStart(tx, *tx.From())
+		}
 
 		// Apply the transaction
 		receipt, gas, err, tokenFeeUsed := core.ApplyTransaction(api.eth.chainConfig, feeCapacity, api.eth.blockchain, nil, gp, statedb, XDCxState, block.Header(), tx, usedGas, vmConfig)
