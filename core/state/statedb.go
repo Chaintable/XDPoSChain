@@ -95,7 +95,8 @@ type StateDB struct {
 	StorageUpdates time.Duration
 	StorageCommits time.Duration
 
-	hooks      *tracing.Hooks
+	OnLog      tracing.LogHook
+	OnCommit   tracing.CommitHook
 	originRoot common.Hash // The root hash of the state before the last commit
 
 	Destructs map[common.Hash]struct{}
@@ -176,8 +177,8 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.Index = s.logSize
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
-	if s.hooks != nil && s.hooks.OnLog != nil {
-		s.hooks.OnLog(log)
+	if s.OnLog != nil {
+		s.OnLog(log)
 	}
 }
 
@@ -881,17 +882,22 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 				return common.Hash{}, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
 			}
 			s.Accounts[addrHash] = abuf
-			for key, val := range obj.dirtyStorage {
+			for key, val := range obj.commitStorage {
 				hash := crypto.Keccak256Hash(key[:])
 				if _, ok := s.Storages[addrHash]; !ok {
 					s.Storages[addrHash] = make(map[common.Hash][]byte)
 				}
 				s.Storages[addrHash][hash] = encode(val)
 			}
+			obj.commitStorage = make(Storage)
 			// Write any storage changes in the state object to its storage trie.
 			if err := obj.CommitTrie(s.db); err != nil {
 				return common.Hash{}, err
 			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			s.Destructs[addrHash] = struct{}{}
 		}
 	}
 	if len(s.stateObjectsDirty) > 0 {
@@ -906,8 +912,8 @@ func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) 
 	defer func(start time.Time) { s.AccountCommits += time.Since(start) }(time.Now())
 
 	defer func() {
-		if s.hooks != nil && s.hooks.OnCommit != nil {
-			s.hooks.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
+		if s.OnCommit != nil {
+			s.OnCommit(s.originRoot, root, s.Destructs, s.Accounts, nil, s.Storages, nil, s.Codes)
 			s.Destructs = make(map[common.Hash]struct{})
 			s.Accounts = make(map[common.Hash][]byte)
 			s.Storages = make(map[common.Hash]map[common.Hash][]byte)
@@ -1010,6 +1016,54 @@ func (s *StateDB) GetOwner(candidate common.Address) common.Address {
 	return common.HexToAddress(ret.Hex())
 }
 
-func (s *StateDB) SetHooks(hooks *tracing.Hooks) {
-	s.hooks = hooks
+func (s *StateDB) SetOnLog(onLog tracing.LogHook) {
+	s.OnLog = onLog
+}
+
+func (s *StateDB) SetOnCommit(onCommit tracing.CommitHook) {
+	s.OnCommit = onCommit
+}
+
+// StateDiff returns the state diff for RPC tracing without committing.
+// Returns: root hash, destructs, accounts, storages, codes, error
+func (s *StateDB) StateDiff(deleteEmptyObjects bool) (common.Hash, map[common.Hash]struct{}, map[common.Hash][]byte, map[common.Hash]map[common.Hash][]byte, map[common.Hash][]byte, error) {
+	// Finalize any pending changes and merge everything into the tries
+	root := s.IntermediateRoot(deleteEmptyObjects)
+
+	var encode = func(val common.Hash) []byte {
+		if val == (common.Hash{}) {
+			return nil
+		}
+		blob, _ := rlp.EncodeToBytes(common.TrimLeftZeroes(val[:]))
+		return blob
+	}
+
+	// Collect state changes without committing
+	for addr := range s.stateObjectsDirty {
+		if obj := s.stateObjects[addr]; !obj.deleted {
+			// Collect contract code
+			if obj.code != nil && obj.dirtyCode {
+				s.Codes[common.BytesToHash(obj.CodeHash())] = obj.code
+			}
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			abuf, err := rlp.EncodeToBytes(obj.data)
+			if err != nil {
+				return common.Hash{}, nil, nil, nil, nil, fmt.Errorf("can't encode object at %s: %v", addr.Hex(), err)
+			}
+			s.Accounts[addrHash] = abuf
+			for key, val := range obj.commitStorage {
+				hash := crypto.Keccak256Hash(key[:])
+				if _, ok := s.Storages[addrHash]; !ok {
+					s.Storages[addrHash] = make(map[common.Hash][]byte)
+				}
+				s.Storages[addrHash][hash] = encode(val)
+			}
+		} else {
+			// If the object was deleted, mark it for deletion
+			addrHash := crypto.Keccak256Hash(addr.Bytes())
+			s.Destructs[addrHash] = struct{}{}
+		}
+	}
+
+	return root, s.Destructs, s.Accounts, s.Storages, s.Codes, nil
 }

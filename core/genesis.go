@@ -353,37 +353,3 @@ func DecodeAllocJson(s string) types.GenesisAlloc {
 	json.Unmarshal([]byte(s), &alloc)
 	return alloc
 }
-
-func getGenesisState(blockhash common.Hash) (alloc GenesisAlloc, err error) {
-	// Genesis allocation is missing and there are several possibilities:
-	// the node is legacy which doesn't persist the genesis allocation or
-	// the persisted allocation is just lost.
-	// - supported networks(mainnet, testnets), recover with defined allocations
-	// - private network, can't recover
-	var genesis *Genesis
-	switch blockhash {
-	case params.MainnetGenesisHash:
-		genesis = DefaultGenesisBlock()
-	case params.TestnetGenesisHash:
-		genesis = DefaultTestnetGenesisBlock()
-	}
-	if genesis != nil {
-		return genesis.Alloc, nil
-	}
-
-	return nil, nil
-}
-
-func coreGenesisToTypesGenesis(alloc GenesisAlloc) types.GenesisAlloc {
-	genesis := make(map[common.Address]types.Account)
-	for address, account := range alloc {
-		genesis[address] = types.Account{
-			Code:       account.Code,
-			Storage:    account.Storage,
-			Balance:    account.Balance,
-			Nonce:      account.Nonce,
-			PrivateKey: account.PrivateKey,
-		}
-	}
-	return genesis
-}

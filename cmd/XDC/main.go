@@ -137,7 +137,6 @@ var (
 		utils.StoreRewardFlag,
 		utils.SetHeadFlag,
 		utils.XDCSlaveModeFlag,
-		utils.VMTraceJsonConfigFlag,
 	}, utils.NetworkFlags, utils.DatabaseFlags)
 
 	rpcFlags = []cli.Flag{
