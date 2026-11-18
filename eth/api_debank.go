@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
 
 	ptracer "github.com/Chaintable/pipeline/tracer"
 	ptypes "github.com/Chaintable/pipeline/types"
@@ -83,20 +82,8 @@ func (api *DebankAPI) DebankBlock(ctx context.Context, blockNrOrHash rpc.BlockNu
 		}
 		blockDiff := ptracer.GenesisAllocToStateDiff(palloc)
 		blockDiff.Hash = header.StateRoot
-		blockFile := &ptypes.BlockFile{
-			Block:            util.BuildPipelineBlock(block),
-			Txs:              make([]ptypes.Transaction, 0),
-			Events:           make([]ptypes.Event, 0),
-			Traces:           make([]ptypes.Trace, 0),
-			ErrorEvents:      make([]ptypes.Event, 0),
-			ErrorTraces:      make([]ptypes.Trace, 0),
-			StorageContracts: make([]string, 0),
-		}
-		for addr, account := range genesis {
-			if len(account.Storage) > 0 {
-				blockFile.StorageContracts = append(blockFile.StorageContracts, strings.ToLower(addr.Hex()))
-			}
-		}
+		blockDiff.ParentHash = types.EmptyRootHash
+		blockFile := ptracer.BuildGenesisBlockFile(block, palloc)
 		var stateDiffBytes []byte
 		if blockDiff != nil {
 			stateDiffBytes, err = util.EncodeToRlp(blockDiff)
@@ -218,5 +205,5 @@ func getGenesisState(blockhash common.Hash) (alloc types.GenesisAlloc, err error
 		return genesis.Alloc, nil
 	}
 
-	return nil, nil
+	return nil, fmt.Errorf("unsupported genesis block %s: allocation is unavailable", blockhash.Hex())
 }
