@@ -1,5 +1,5 @@
-github.com/Chaintable/pipeline v0.0.70-0.20261118083550-2d0c10fc45df h1:fVrowbGt4nxf+bLLe98gl3JzWHs73EzkIddlsqYVegM=
-github.com/Chaintable/pipeline v0.0.70-0.20261118083550-2d0c10fc45df/go.mod h1:cSn0wWmA90hmgLbp4SrCu7a52Bfa+v7h/+8UeSOT7Jc=
+github.com/Chaintable/pipeline v0.0.70-0.20261118084037-fc22c90fb3dd h1:BJUswG3kQOt/MxAzS4sV+pAYVyKvmnEnPzEMtKhEuf4=
+github.com/Chaintable/pipeline v0.0.70-0.20261118084037-fc22c90fb3dd/go.mod h1:cSn0wWmA90hmgLbp4SrCu7a52Bfa+v7h/+8UeSOT7Jc=
 github.com/StackExchange/wmi v1.2.1 h1:VIkavFPXSjcnS+O8yTq7NI32k0R5Aj+v39y29VYDOSA=
 github.com/StackExchange/wmi v1.2.1/go.mod h1:rcmrprowKIVzvc+NUiLncP2uuArMWLCbu9SBzvHz7e8=
 github.com/VictoriaMetrics/fastcache v1.13.2 h1:2XTB49aLSuCex7e9P5rqrfQcMkzGjh5Vq3GMFa8YpCA=

@@ -3,7 +3,7 @@ module github.com/XinFinOrg/XDPoSChain
 go 1.24.0
 
 require (
-	github.com/Chaintable/pipeline v0.0.70-0.20261118083550-2d0c10fc45df
+	github.com/Chaintable/pipeline v0.0.70-0.20261118084037-fc22c90fb3dd
 	github.com/VictoriaMetrics/fastcache v1.13.2
 	github.com/cespare/cp v1.1.1
 	github.com/davecgh/go-spew v1.1.1
